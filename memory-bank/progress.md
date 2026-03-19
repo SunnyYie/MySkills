@@ -598,3 +598,59 @@
 - 尚未开始任务 12；当前只实现 `Execution` 阶段的等待外部输入、补录标准化与当前有效态保护，不生成 Jira preview、不执行 Jira 写回，也不进入 Feishu 写入链路。
 - 当前验证结果仍通过 `verification_results_ref` 挂到 `ExecutionContext` 当前有效态，原始外部正文和长输出继续遵循 artifact ref / redaction 边界，不直接内嵌到 `context.json`。
 - 当前 GitLab 产物标准化只覆盖任务 11 需要的 commit / branch / MR 引用校验与默认字段补齐，不提前实现 task 12 所需的 Jira draft 生成或更完整的 connector 预览职责。
+
+## 2026-03-19 - 任务 12：实现 Jira preview 与写回执行链路
+
+### 本轮完成内容
+
+- 在 `src/domain/schemas.ts` 中补齐任务 12 所需的 Jira 写回契约：为 `JiraWritebackDraft` 新增 `target_ref`、`request_payload_hash`、`dedupe_scope`、`expected_target_version`，为 `JiraWritebackResult` 新增 `already_applied`、`external_request_id`，并补出 `RequirementReference`、`JiraWritebackDraft`、`JiraWritebackResult` type export。
+- 在 `src/infrastructure/connectors/jira/index.ts` 中新增 Jira 写回 connector 的最小纯映射能力：`buildJiraWritebackPreviewDraft()` 负责把 canonical 输入转成稳定 preview draft，自动注入 comment marker、生成脱敏 `request_payload`、`request_payload_hash`、`idempotency_key` 与 `dedupe_scope`；`createJiraExecuteResult()` / `createJiraAlreadyAppliedResult()` 负责把 execute 结果和查重命中结果标准化为统一 `JiraWritebackResult`。
+- 在 `src/workflow/jira-writeback.ts` 中实现任务 12 的 workflow 纯规则层：`createJiraWritebackPreviewState()` 负责刷新 preview、回写 `jira_writeback_draft_ref`、计算 `previewHash`、使旧审批失效；`guardJiraWritebackRequirementBinding()` 负责在真实写回前执行 requirement binding 强约束阻塞；`buildJiraWritebackPreparedEntry()`、`markJiraWritebackEntryDispatched()`、`finalizeJiraWritebackEntry()` 固定 `prepared -> dispatched -> terminal` 的 Jira 副作用账本顺序；`shouldSkipJiraWritebackExecution()` 负责 dry-run 与已终态/已对账写入的去重跳过判定。
+- 更新 `src/workflow/index.ts` 暴露 Jira writeback 规则层能力，保持 workflow 公共面稳定，不让调用方深引内部文件。
+- 新增 `tests/unit/jira-writeback/jira-writeback.spec.ts`，并扩展 `tests/unit/domain/contracts.spec.ts`，通过红绿测试锁定 preview draft、强约束阻塞、preview 刷新与旧审批失效、approval preview 绑定、ledger 顺序、dry-run 边界和已写入不重复 execute 的最小闭环。
+
+### 依据
+
+- 用户指令：实施既定“任务 12：Jira Preview 与写回执行链路”计划；先在新的 `task12` worktree 中补测试，再实现；验证通过前不更新文档，不进入任务 13；验证通过后更新 `progress.md`、`architecture.md`，最后合并回 `main`。
+- `memory-bank/实施计划.md` 任务 12：要求建立 Jira preview、审批绑定、requirement binding 强约束阻塞、副作用账本顺序、幂等 marker、恢复前 reconcile 的完整链路。
+- `memory-bank/需求文档.md`：
+  - “dry-run 与真实写入验收”：外部写回必须先预览，再审批，再执行；dry-run 不产生真实外部副作用。
+  - “未绑定需求处理策略”：允许分析阶段继续，但 requirement binding 强约束项目在外部写回前必须阻塞。
+  - “状态机要求”“检查点与恢复要求”：遇到 `outcome_unknown` 或未终态副作用恢复时，必须先对账，不能盲重试。
+- `memory-bank/技术方案.md`：
+  - “11.2 Jira Connector”：preview / execute 契约、comment marker、幂等去重、`outcome_unknown` 恢复先按 marker 对账。
+  - “12.4 审计与副作用账本”：Jira/飞书真实写入的 ledger 顺序固定为 `prepared -> dispatched -> terminal`，且真实请求前必须先落 `prepared`。
+  - “13.3 命令语义约束”：审批必须绑定不可变 `preview_ref`，旧 preview 不能越过新 preview 继续执行。
+
+### 验证记录
+
+1. 验证对象：任务 12 红灯起点
+   触发方式：先运行 `npm run test:unit -- tests/unit/jira-writeback/jira-writeback.spec.ts tests/unit/domain/contracts.spec.ts`
+   预期结果：实现前因缺少 Jira 写回 connector / workflow 入口和新增 schema 字段而失败，而不是误绿
+   实际结果：通过；首轮失败准确暴露 `buildJiraWritebackPreviewDraft`、`guardJiraWritebackRequirementBinding`、`buildJiraWritebackApprovalRecord`、`createJiraAlreadyAppliedResult` 等接口不存在，且 `JiraWritebackDraftSchema` 还未接收任务 12 所需字段
+
+2. 验证对象：任务 12 unit 红绿闭环
+   触发方式：补实现后再次运行 `npm run test:unit -- tests/unit/jira-writeback/jira-writeback.spec.ts tests/unit/domain/contracts.spec.ts`
+   预期结果：preview draft、强约束阻塞、preview 刷新与旧审批失效、approval preview 绑定、ledger 顺序、dry-run 跳过和已写入不重复 execute 全部通过
+   实际结果：通过；新增 `jira-writeback` 6 项断言与更新后的 domain 契约断言全部通过。过程中暴露过一个测试层细节（对象 payload 断言方式）和一个公共 type export 缺口，修正后重新验证通过
+
+3. 验证对象：根级测试聚合入口
+   触发方式：运行 `npm test`
+   预期结果：任务 12 新增 unit 测试通过，任务 1-11 的既有 unit / integration / acceptance 回归继续通过
+   实际结果：通过；unit 共 57/57 通过，integration `config-commands` 2/2 通过，acceptance `task1-project-skeleton` 4/4 通过
+
+4. 验证对象：TypeScript 类型检查
+   触发方式：运行 `npm run typecheck`
+   预期结果：新增 Jira writeback connector、workflow 规则层与 domain type export 可通过类型检查
+   实际结果：通过；命令退出码为 0。期间曾暴露 `RequirementReference` 未从 domain 公共面导出的问题，补充 export 后重新验证通过
+
+5. 验证对象：构建入口
+   触发方式：运行 `npm run build`
+   预期结果：新增 `src/workflow/jira-writeback.ts` 与 Jira connector 更新可正常编译到 `dist/`
+   实际结果：通过；命令退出码为 0
+
+### 当前边界说明
+
+- 尚未开始任务 13；当前只实现 Jira preview / execute 链路的纯契约与纯规则层，不进入 Feishu preview / append 写入链路。
+- 当前 Jira 写回仍停留在 connector 纯映射与 workflow 纯规则层：不发真实网络请求、不写 `side-effects.ndjson`、不接 checkpoint 持久化，也不注册 CLI `preview-write` / `execute-write` 命令。
+- 当前 preview draft 中的 `request_payload` 是为审批和 execute 输入对齐服务的脱敏 payload 形态；真正“默认不落原始 request_payload、只落 hash 与 preview”的 storage 策略仍由后续持久化接线任务承接。

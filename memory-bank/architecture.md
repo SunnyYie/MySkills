@@ -518,3 +518,52 @@
 - 任务 9 没有把“无结果”和“多候选”都粗暴归类为失败，而是显式进入 `waiting`。这是为了贴合实施计划里“workflow 能区分可继续分析和需人工判断的结果”的要求，也给任务 10 留下清晰边界：只有当代码定位足够收敛时，修复计划才应该继续自动生成。
 - `impact_modules` 没有被直接塞回 `ExecutionContext` 新字段，而是先作为 `CodeLocalizationData` 输出面固定。这是有意控制范围：技术方案已经要求运行态至少保留 `repo_selection`、`code_targets`、`root_cause_hypotheses`，因此本轮把“影响模块”维持为阶段产物，避免在任务 9 提前扩张运行态。
 - 搜索策略目前刻意保持为“模块规则缩窄目录 + 稳定词项命中排序”的最小实现，没有提前引入 AST、语义索引或 Git 历史。这让任务 9 先解决“结构和边界”的问题，而把更重的定位智能留给后续明确授权的迭代。
+
+## 任务 10 当前 Fix Planning 层
+
+任务 10 完成后，仓库第一次拥有了“从已定位代码候选继续收敛到审批前修复计划”的稳定中间层。这个阶段仍然不自动改代码，也不接入外部补录，只负责把上游定位结果转成可审批、可追溯、可交接给 `Execution` 的结构化计划。
+
+## 新增文件职责
+
+### `src/domain/schemas.ts`
+
+- 在既有 `CodeLocalizationDataSchema` 之后，新增 `FixPlanningDataSchema` 与 `FixPlanningStageResultSchema`。
+- 把任务 10 的输出面固定为七块：`fix_summary`、`impact_scope`、`verification_plan`、`open_risks`、`pending_external_inputs`、`referenced_code_targets`、`referenced_root_cause_hypotheses`。
+- 这里最关键的不是“字段多”，而是把“Execution 之后还需要什么外部输入”与“当前计划基于哪些定位依据生成”直接写进契约，避免下游再用临时字符串拼接。
+
+### `src/skills/fix-planner/index.ts`
+
+- 提供任务 10 的核心 skill `createFixPlan()`。
+- 只消费已经结构化的 `ProjectProfile`、`JiraIssueSnapshot`、`ProjectContextData`、`RequirementBrief` 和 `CodeLocalizationStageResult`，继续遵守 “skill 不直接做 I/O” 的边界。
+- 当 `Code Localization` 仍处于 `waiting` 时，返回 `waiting` 的 `Fix Planning` 结果，并透传 `waiting_for` 语义，明确阻止“定位还没收敛就先编一个修复计划”。
+- 当定位已完成时，负责把代码候选、影响模块、brief 中的待确认问题和 requirement 绑定风险收敛成审批前 plan，同时补出 `Execution` 阶段必需的 `pending_external_inputs`。
+
+### `src/skills/index.ts`
+
+- 继续承担 skills 统一出口职责，并在任务 10 中新增 `fix-planner` 导出。
+- 这保持了 skills 层公共面的一致性，也避免后续 workflow / CLI 接入时出现“新 skill 只能深路径导入”的分叉。
+
+### `tests/unit/fix-planner/fix-planner.spec.ts`
+
+- 任务 10 的 Fix Planning 单元测试。
+- 锁定两个核心分支：定位已收敛时输出 `completed` 的审批前计划，定位未收敛时输出 `waiting` 而不是伪造计划。
+- 同时验证三类容易漂移的细节：计划必须引用 `code_targets` / `root_cause_hypotheses`，必须带 `pending_external_inputs`，必须把开放风险留在显式字段里而不是藏在 summary 文本中。
+
+### `tests/unit/domain/contracts.spec.ts`
+
+- 在既有 domain 契约测试中补上 `FixPlanning` 的 schema 回归。
+- 作用不是重复测业务逻辑，而是锁定任务 10 的字段面，防止后续把 `open_risks`、`pending_external_inputs` 或定位引用关系悄悄删回“自由文本说明”。
+
+### `tests/unit/workflow/state-machine.spec.ts`
+
+- 这次补了一条任务 10 相关的 workflow 回归用例。
+- 它明确验证两件事：`Fix Planning` 仍然必须走 `output_ready -> waiting_approval` 审批门；当用户选择 `revise` 回退到 `Fix Planning` 时，当前有效的 `fix_plan` / `verification_plan` 与活跃 artifact / approval 引用都会被清空。
+- 这条测试没有新增 workflow 能力，而是把任务 4 已经建立的状态机语义显式绑定到任务 10，防止后续实现 `Execution` 时误把 fix plan 当成永不失效的静态结果。
+
+## 任务 10 架构洞察
+
+- 任务 10 最重要的收敛，是把“代码定位结果”升级为“审批前的行动建议”，但仍保持它是一个中间产物，而不是直接触发自动执行。这样既符合需求文档里 v1 不自动改代码的边界，也为任务 11 的外部补录留出了清晰接口。
+- `FixPlanningData` 里显式保留 `referenced_code_targets` 与 `referenced_root_cause_hypotheses`，是为了避免计划变成脱离上下文的孤立文案。审批人应该能看见“这个方案到底建立在哪些定位依据上”，后续报告和回退也需要这个追溯链。
+- `pending_external_inputs` 被放进 fix plan，而不是等到 `Execution` 才临时推导，是为了让审批阶段就能看见“批准后还需要补什么”。这让 `Fix Planning` 和 `Execution` 之间的交接字段稳定下来，减少任务 11 再次扩张 plan 结构的压力。
+- `Fix Planning` 在定位未收敛时返回 `waiting`，而不是生成低可信度建议，是任务 9 与任务 10 之间最关键的接口纪律。只有当 `Code Localization` 已经给出足够收敛的代码目标时，修复计划才应该进入审批门。
+- 这轮没有改 `ExecutionContext` 的物理写入与 artifact 绑定方式，而只先冻结 `StageResult` 输出面，是一种刻意的小步推进：先把“计划应该长什么样”固定，再让后续 workflow / storage 决定“它何时落盘、如何进入当前有效态”。

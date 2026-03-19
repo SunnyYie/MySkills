@@ -433,6 +433,18 @@ export const CodeLocalizationDataSchema = z
   })
   .strict();
 
+export const FixPlanningDataSchema = z
+  .object({
+    fix_summary: NonEmptyStringSchema,
+    impact_scope: z.array(NonEmptyStringSchema).min(1),
+    verification_plan: z.array(NonEmptyStringSchema).min(1),
+    open_risks: z.array(NonEmptyStringSchema),
+    pending_external_inputs: z.array(NonEmptyStringSchema).min(1),
+    referenced_code_targets: z.array(CodeTargetSchema).min(1),
+    referenced_root_cause_hypotheses: z.array(NonEmptyStringSchema).min(1),
+  })
+  .strict();
+
 export const ExecutionContextSchema = z
   .object({
     run_id: NonEmptyStringSchema,
@@ -547,6 +559,9 @@ export const RequirementSynthesisStageResultSchema = createStageResultSchema(
 export const CodeLocalizationStageResultSchema = createStageResultSchema(
   CodeLocalizationDataSchema,
 );
+export const FixPlanningStageResultSchema = createStageResultSchema(
+  FixPlanningDataSchema,
+);
 
 export type ProjectProfile = z.infer<typeof ProjectProfileSchema>;
 export type ExecutionContext = z.infer<typeof ExecutionContextSchema>;
@@ -563,6 +578,7 @@ export type RequirementCandidate = z.infer<typeof RequirementCandidateSchema>;
 export type JiraIntakeData = z.infer<typeof JiraIntakeDataSchema>;
 export type ProjectContextData = z.infer<typeof ProjectContextDataSchema>;
 export type CodeLocalizationData = z.infer<typeof CodeLocalizationDataSchema>;
+export type FixPlanningData = z.infer<typeof FixPlanningDataSchema>;
 export type RepoSelection = z.infer<typeof RepoSelectionSchema>;
 export type StageResultStatus = z.infer<typeof StageResultStatusSchema>;
 export type StageResult<T> = {
@@ -585,3 +601,4 @@ export type RequirementSynthesisStageResult = z.infer<
 export type CodeLocalizationStageResult = z.infer<
   typeof CodeLocalizationStageResultSchema
 >;
+export type FixPlanningStageResult = z.infer<typeof FixPlanningStageResultSchema>;

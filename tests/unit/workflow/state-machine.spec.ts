@@ -184,6 +184,29 @@ describe('workflow state machine', () => {
     });
   });
 
+  it('keeps Fix Planning behind an approval gate and clears its active outputs after revise rollback', () => {
+    expect(
+      canTransitionStageStatus('Fix Planning', 'output_ready', 'waiting_approval'),
+    ).toBe(true);
+    expect(
+      canTransitionStageStatus('Fix Planning', 'output_ready', 'completed'),
+    ).toBe(false);
+
+    const result = applyRevisionRollback({
+      context: createContext(),
+      rollbackToStage: 'Fix Planning',
+      supersedingApprovalId: 'approval-fix-plan-v2',
+      updatedAt: '2026-03-19T11:18:00.000Z',
+    });
+
+    expect(result.context.current_stage).toBe('Fix Planning');
+    expect(result.context.stage_status_map['Fix Planning']).toBe('not_started');
+    expect(result.context.fix_plan).toEqual([]);
+    expect(result.context.verification_plan).toEqual([]);
+    expect(result.context.stage_artifact_refs['Fix Planning']).toBeUndefined();
+    expect(result.context.active_approval_ref_map['Fix Planning']).toBeUndefined();
+  });
+
   it('marks rollback scope as stale while preserving history references outside the active state', () => {
     const result = applyRevisionRollback({
       context: createContext(),

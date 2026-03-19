@@ -480,3 +480,64 @@
 - 当前代码搜索策略刻意保持最小：只在 `repo.module_rules` 解析出的目录下递归读取文本文件，并基于 issue / brief 的稳定词项做命中排序；没有提前引入 AST、语义索引、Git 历史或复杂启发式。
 - 当前“定位产物保存与可回溯”先通过 `StageResult` 的 `source_refs`、归一化 `code_targets` 和稳定 `impact_modules` 输出面固定下来；真正写入 run artifact、checkpoint 或审批绑定仍属于后续 workflow / storage 任务。
 - 当前 `impact_modules` 仍以 `ProjectContext` 阶段已有的模块候选为主，命中结果只在未预先缩窄模块时作为补充，不在本轮抢先重定义 `ExecutionContext` 字段。
+
+## 2026-03-19 - 任务 10：实现 `Fix Planning`
+
+### 本轮完成内容
+
+- 在 `src/domain/schemas.ts` 中新增 `FixPlanningDataSchema` 与 `FixPlanningStageResultSchema`，把任务 10 的最小输出面固定为 `fix_summary`、`impact_scope`、`verification_plan`、`open_risks`、`pending_external_inputs`，以及对 `code_targets` / `root_cause_hypotheses` 的显式引用。
+- 在 `src/skills/fix-planner/index.ts` 中实现 `createFixPlan()`：消费 `ProjectProfile`、`JiraIssueSnapshot`、`ProjectContextData`、`RequirementBrief` 与 `CodeLocalizationStageResult`，输出可审批、可追溯、可交给 `Execution` 阶段消费的结构化 fix plan。
+- 在 `src/skills/fix-planner/index.ts` 中显式处理 `Code Localization` 未收敛的场景：当定位结果仍是 `waiting` 或没有有效定位数据时，`Fix Planning` 返回 `waiting`，保留原有 `waiting_for` 语义，并明确阻止凭空生成计划。
+- 在 `src/skills/index.ts` 中纳入 `fix-planner` 公共导出，保持 skills 层统一入口不漂移。
+- 新增 `tests/unit/fix-planner/fix-planner.spec.ts`、扩展 `tests/unit/domain/contracts.spec.ts`、补充 `tests/unit/workflow/state-machine.spec.ts` 回归用例，通过红绿测试锁定任务 10 的最小闭环与既有审批/回退语义。
+
+### 依据
+
+- 用户指令：请阅读所有 `memory-bank` 文档，并继续执行实施计划的任务 10；每在验证测试结果之前，请勿开始下一个任务；测试验证通过后记录到 `progress.md`，补充 `architecture.md`，并且在此之前不要进行任务 11；在 worktree 代码测试通过后合并到 `main`。
+- `memory-bank/实施计划.md` 任务 10：要求实现 `Fix Planning`，覆盖最小字段、与代码定位结果的引用关系、审批门和 revise 后旧计划失效规则，以及到 `Execution` 阶段的交接字段。
+- `memory-bank/需求文档.md`：
+  - “工作流需求”：`Fix Planning` 阶段需要输出修复建议和验证建议，并作为第二个关键审批门。
+  - “审批与人工确认需求”：`Fix Planning` 后用户需要确认是否进入修复执行。
+  - “ExecutionContext 最小字段集”：运行态至少保留 `fix_plan` 与 `verification_plan`，说明本阶段输出必须能被后续执行消费。
+- `memory-bank/技术方案.md`：
+  - “9.1 主流程说明”：`Fix Planning` 负责生成修复建议、影响范围和验证建议。
+  - “10.2 fix-planner”：`fix-planner` 负责输出修复建议、验证建议与开放风险。
+  - “工作流状态机设计”：`Fix Planning` 属于审批门阶段，`revise` 后需要让旧输出失效。
+
+### 验证记录
+
+1. 验证对象：任务 10 红灯起点
+   触发方式：先运行 `npm run test:unit -- tests/unit/fix-planner/fix-planner.spec.ts`
+   预期结果：实现前因缺少 `src/skills/fix-planner/index.ts` 与 `FixPlanning` domain 契约而失败，而不是误绿
+   实际结果：通过；首轮失败准确暴露 `src/skills/fix-planner/index.ts` 缺失以及 `FixPlanningDataSchema` / `FixPlanningStageResultSchema` 未定义
+
+2. 验证对象：任务 10 Fix Planning 单元闭环
+   触发方式：补实现后再次运行 `npm run test:unit -- tests/unit/fix-planner/fix-planner.spec.ts`
+   预期结果：审批前 fix plan 字段、引用追溯、Execution 交接字段，以及未收敛定位时的 waiting 语义全部通过
+   实际结果：通过；新增 3 项断言全部通过，确认 `completed` / `waiting` 两类输出，以及“completed 但缺少 actionable code target 时不崩溃”的输入护栏均已稳定
+
+3. 验证对象：Fix Planning domain 契约与 workflow 回归
+   触发方式：运行 `npm run test:unit -- tests/unit/domain/contracts.spec.ts` 与 `npm run test:unit -- tests/unit/workflow/state-machine.spec.ts`
+   预期结果：`FixPlanning` schema 能固定最小字段集，且既有 workflow 仍把 `Fix Planning` 视为审批门并在 revise 回退时清空当前有效 plan
+   实际结果：通过；domain 契约 10/10 通过，workflow 状态机 5/5 通过
+
+4. 验证对象：根级测试聚合入口
+   触发方式：运行 `npm test`
+   预期结果：任务 10 新增 unit 测试通过，任务 1-9 的既有 unit / integration / acceptance 回归继续通过
+   实际结果：通过；unit 共 43/43 通过，integration `config-commands` 2/2 通过，acceptance `task1-project-skeleton` 4/4 通过
+
+5. 验证对象：TypeScript 类型检查
+   触发方式：运行 `npm run typecheck`
+   预期结果：新增 `Fix Planning` 契约、skill 与测试夹具可通过类型检查
+   实际结果：通过；命令退出码为 0
+
+6. 验证对象：构建入口
+   触发方式：运行 `npm run build`
+   预期结果：新增 `src/skills/fix-planner` 与相关 domain 更新可正常编译到 `dist/`
+   实际结果：通过；命令退出码为 0
+
+### 当前边界说明
+
+- 尚未开始任务 11；当前只实现 `Fix Planning` 所需的结构化计划生成与 waiting 语义，不实现 `Execution` 阶段的外部输入补录、验证结果标准化或 GitLab 产物录入。
+- 当前 `Fix Planning` 仍是纯 skill 输出，不提前把 fix plan 真正写入 run artifacts、审批记录或 checkpoint；这些物理绑定仍属于后续 workflow / storage 接入任务。
+- 当前 plan 内容刻意保持为稳定模板式归纳，依赖 `Requirement Brief` 与 `Code Localization` 已产出的结构化输入，不引入自由发挥式方案扩写或自动改代码承诺。

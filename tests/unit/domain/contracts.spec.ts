@@ -13,6 +13,8 @@ import {
   ExecutionContextSchema,
   FeishuRecordDraftSchema,
   FeishuRecordResultSchema,
+  FixPlanningDataSchema,
+  FixPlanningStageResultSchema,
   GitLabArtifactSchema,
   JiraWritebackDraftSchema,
   JiraWritebackResultSchema,
@@ -446,6 +448,70 @@ describe('domain contracts', () => {
         latest_side_effect_ref: null,
         parent_checkpoint_id: null,
         context_hash: 'sha256:context',
+      }).success,
+    ).toBe(true);
+  });
+
+  it('defines a reviewable fix planning contract with execution handoff fields', () => {
+    expect(
+      FixPlanningDataSchema.safeParse({
+        fix_summary:
+          'Guard the coupon stacking branch in the payments validator before manual repair is executed.',
+        impact_scope: [
+          'payments module coupon validation flow',
+          'src/payments/coupon-validator.ts',
+        ],
+        verification_plan: [
+          'Re-run the coupon stacking regression for BUG-123 after the manual fix is applied.',
+          'Capture the verification evidence reference for the final run report.',
+        ],
+        open_risks: ['Requirement acceptance criteria is still waiting for product confirmation.'],
+        pending_external_inputs: [
+          'Provide the final GitLab artifact reference after the manual fix is applied.',
+          'Record the final verification evidence after the manual fix is applied.',
+        ],
+        referenced_code_targets: [
+          {
+            file_path: 'src/payments/coupon-validator.ts',
+            reason: 'Matched coupon combination terms in module payments',
+          },
+        ],
+        referenced_root_cause_hypotheses: [
+          'The payments coupon validator likely rejects valid loyalty and campaign combinations.',
+        ],
+      }).success,
+    ).toBe(true);
+
+    expect(
+      FixPlanningStageResultSchema.safeParse({
+        status: 'completed',
+        summary: 'Prepared an approval-ready fix plan for BUG-123.',
+        data: {
+          fix_summary:
+            'Guard the coupon stacking branch in the payments validator before manual repair is executed.',
+          impact_scope: ['payments module coupon validation flow'],
+          verification_plan: [
+            'Re-run the coupon stacking regression for BUG-123 after the manual fix is applied.',
+          ],
+          open_risks: [],
+          pending_external_inputs: [
+            'Provide the final GitLab artifact reference after the manual fix is applied.',
+          ],
+          referenced_code_targets: [
+            {
+              file_path: 'src/payments/coupon-validator.ts',
+              reason: 'Matched coupon combination terms in module payments',
+            },
+          ],
+          referenced_root_cause_hypotheses: [
+            'The payments coupon validator likely rejects valid loyalty and campaign combinations.',
+          ],
+        },
+        warnings: [],
+        errors: [],
+        waiting_for: null,
+        source_refs: ['jira:BUG-123', 'brief:BUG-123', 'code-localization:BUG-123'],
+        generated_at: '2026-03-19T10:30:00.000Z',
       }).success,
     ).toBe(true);
   });

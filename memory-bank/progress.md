@@ -151,3 +151,53 @@
 - 尚未开始任务 4；当前只定义持久化布局、allowlist、dry-run 标记、redaction 入口和基础文件系统语义，不实现工作流状态机、审批流转、恢复入口路由或 reconcile 决策。
 - 当前 redaction 只覆盖任务 3 上位文档明确要求的敏感键和显式 `sensitiveFieldPaths`；若后续 connector 引入新的敏感字段类别，应先补充文档基线或任务说明，再扩展规则。
 - 当前 checkpoint 读取一致性建立在“命名按序 + schema 校验 + 顺序读取”之上；更高阶的恢复策略、未终态副作用 reconcile 与 target 级全局锁仍属于任务 4/后续任务。
+
+## 2026-03-19 - 任务 4：实现工作流状态机与不变式
+
+### 本轮完成内容
+
+- 在 `src/workflow/state-machine.ts` 中实现任务 4 需要的最小 workflow 状态机纯函数，固定八阶段主流程的合法状态流转边界，并明确审批阶段与外部写入阶段不能绕过 `waiting_approval -> approved_pending_write -> executing_side_effect` 的门禁路径。
+- 在 `src/workflow/state-machine.ts` 中实现审批决定到 `run_lifecycle_status` / `run_outcome_status` 的映射规则，区分分析阶段审批通过后直接 `completed`，与 Jira/飞书写入阶段审批通过后仅进入 `approved_pending_write` 的差异。
+- 在 `src/workflow/state-machine.ts` 中实现 `applyRevisionRollback()`，固定 `revise` 生效后从指定回退阶段起重置当前有效态、将后续阶段标记为 `stale`、清理当前有效 artifact / approval 引用，并保留历史事实由 artifacts 与审批历史承载。
+- 在 `src/workflow/state-machine.ts` 中实现 `getRecoveryAction()`，把 `waiting_external_input`、`partial_success`、`outcome_unknown` 和 `prepared` / `dispatched` 未终态副作用统一收敛为显式恢复动作，为任务 5 的恢复入口路由提供稳定策略基线。
+- 更新 `src/workflow/index.ts` 导出 workflow 状态机能力，并新增 `tests/unit/workflow/state-machine.spec.ts`，以红绿测试锁定任务 4 的最小契约。
+
+### 依据
+
+- 用户指令：继续执行实施计划任务 4；每次验证通过前不进入任务 5，验证通过后同步 `progress.md` 与 `architecture.md`，并在 worktree 代码测试通过后合并到 `main`。
+- `memory-bank/实施计划.md` 任务 4：建立主流程统一状态机、审批流转、回退规则和恢复不变式，且本任务建议落点为 `src/workflow/` 与 `tests/workflow/`。
+- `memory-bank/需求文档.md`：
+  - “状态机要求”：必须区分阶段状态、审批决定和 run 状态；需要审批的阶段必须由 `output_ready` 进入 `waiting_approval`；`revise` 后允许回退到任一指定上游阶段并将后续阶段标记为 `stale`。
+  - “检查点与恢复要求”：恢复必须基于已持久化 checkpoint；`waiting_external_input` 恢复后应继续等待补录；已成功外部写入必须可去重。
+  - “审批与人工确认需求”：`approve`、`reject`、`revise` 必须独立记录，且 `reject` 终止 run 但保留上下文。
+- `memory-bank/技术方案.md`：
+  - “8. 状态机设计”：固定 `approved_pending_write`、`executing_side_effect`、`partial_success`、`outcome_unknown` 等状态语义与不变式。
+  - “9. 工作流设计” 与 “14. 审批与人工确认设计”：四个审批门、Jira/飞书写入前 preview 审批、旧审批 `superseded` 规则。
+
+### 验证记录
+
+1. 验证对象：任务 4 workflow 红绿测试闭环
+   触发方式：先运行 `npm run test:unit -- tests/unit/workflow/state-machine.spec.ts` 观察失败，再在实现后重复运行同一命令
+   预期结果：实现前因缺少 workflow 状态机导出而失败，实现后任务 4 新增 4 项断言全部通过
+   实际结果：通过；首轮失败准确暴露 `canTransitionStageStatus`、`applyApprovalDecision`、`applyRevisionRollback`、`getRecoveryAction` 尚未实现，补实现后 `tests/unit/workflow/state-machine.spec.ts` 4/4 通过
+
+2. 验证对象：根级测试聚合入口
+   触发方式：运行 `npm run test`
+   预期结果：任务 4 workflow 单元测试通过，任务 1/2/3 的 acceptance 与 unit 回归继续通过
+   实际结果：通过；unit 共 17/17 通过，integration 以 `--passWithNoTests` 退出码 0，acceptance `task1-project-skeleton` 4/4 通过
+
+3. 验证对象：TypeScript 类型检查
+   触发方式：运行 `npm run typecheck`
+   预期结果：新增 workflow 状态机模块和导出入口可通过类型检查
+   实际结果：通过；命令退出码为 0
+
+4. 验证对象：构建入口
+   触发方式：运行 `npm run build`
+   预期结果：新增 `src/workflow` 文件可被编译到 `dist/`
+   实际结果：通过；命令退出码为 0
+
+### 当前边界说明
+
+- 尚未开始任务 5；当前只实现 workflow 层的纯状态机、不变式和恢复动作判定，不实现 app 层 run 创建、锁获取、checkpoint 持久化编排或 CLI 到 use case 的装配。
+- 当前 `applyRevisionRollback()` 只负责重置 `ExecutionContext` 当前有效态与活动引用；审批历史、artifact 历史和 checkpoint 写入仍由后续任务 5/后续持久化调用方承接。
+- 当前 `getRecoveryAction()` 只输出“等待 / 对账 / 人工复核 / 继续当前阶段”的策略结论，不直接执行 reconcile、重试或恢复路由。

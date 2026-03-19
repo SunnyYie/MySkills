@@ -49,3 +49,55 @@
 
 - 尚未开始任务 2，`src/domain`、`src/workflow`、`src/skills`、`src/storage`、`src/infrastructure` 等目录目前只保留锚点文件，不承载正式业务契约。
 - 尚未引入任何真实外部连接器、持久化副作用、状态机逻辑或 schema 细节。
+
+## 2026-03-19 - 任务 2：定义领域层 schema 与枚举
+
+### 本轮完成内容
+
+- 在 `src/domain/enums.ts` 中冻结跨任务契约需要复用的阶段枚举、阶段状态、审批决定、审批状态、`run_lifecycle_status`、`run_outcome_status`、`run_mode`、GitLab/Jira/飞书写入相关枚举，以及统一错误类别与默认重试语义。
+- 在 `src/domain/schemas.ts` 中定义 `ProjectProfile`、`ExecutionContext`、`RequirementBrief`、`BugfixReport`、`ApprovalRecord`、`SideEffectLedgerEntry`、`CheckpointRecord`、`StructuredError` 的 Zod schema，并补齐 `GitLabArtifact`、Jira 写回 draft/result、飞书写入 draft/result 等下游直接依赖的结构化契约。
+- 通过 `RequirementBriefSchema`、`RequirementReferenceSchema`、`GitLabArtifactSchema`、`ApprovalRecordSchema` 等条件约束，固定“未绑定需求必须带 `binding_reason`”“GitLab commit/branch/MR 条件必填”“`revise` 必须带 `rollback_to_stage`”等规则。
+- 以 `EXECUTION_CONTEXT_STORAGE_PROJECTION` 明确 `ExecutionContext` 的逻辑字段与物理存储边界，约束 `context.json` 仅承载当前有效态字段，而 side effect 历史、checkpoint 历史和错误长正文通过独立文件或 artifact ref 承载。
+- 新增 `tests/unit/domain/contracts.spec.ts`，以单元测试锁定任务 2 的最小契约，避免后续 workflow、storage、CLI 反向篡改 domain 层字段和命名。
+
+### 依据
+
+- 用户指令：继续执行实施计划任务 2，在验证通过前不进入任务 3，验证通过后同步 `progress.md` 与 `architecture.md`。
+- `memory-bank/实施计划.md` 任务 2：冻结核心对象、字段、条件必填规则、状态枚举与统一错误语义，并写清 `ExecutionContext` 的逻辑全量字段与持久化投影边界。
+- `memory-bank/需求文档.md`：
+  - “项目关系绑定需求”：`ProjectProfile` 最小字段与 requirement link rules 的边界。
+  - “执行上下文需求”：`ExecutionContext` 的最小字段、敏感字段路径要求与可恢复诉求。
+  - “输出与报告需求”：`Bugfix Report` 最小字段。
+  - “错误处理需求”：统一结构化错误字段、部分成功语义与用户动作建议。
+- `memory-bank/技术方案.md`：
+  - “核心数据模型”：8 个核心对象的最小字段定义。
+  - “状态机设计”：阶段状态、审批状态、run 双轨状态与不变式。
+  - “错误处理设计”：错误类别、`partial_success`、`outcome_unknown` 语义。
+
+### 验证记录
+
+1. 验证对象：任务 2 domain 契约单元测试
+   触发方式：先运行 `npm run test:unit -- tests/unit/domain/contracts.spec.ts` 观察失败，再在实现后重复运行同一命令
+   预期结果：实现前因缺少 schema/枚举而失败，实现后 9 个契约断言全部通过
+   实际结果：通过；首轮失败准确暴露缺失导出与 schema 约束，修复后 `tests/unit/domain/contracts.spec.ts` 9/9 通过
+
+2. 验证对象：根级测试聚合入口
+   触发方式：运行 `npm run test`
+   预期结果：新增 domain 单元测试通过，任务 1 验收测试继续通过，未新增 integration 测试时入口仍保持可执行
+   实际结果：通过；unit 9/9 通过，integration 以 `--passWithNoTests` 退出码 0，acceptance `task1-project-skeleton` 4/4 通过
+
+3. 验证对象：TypeScript 类型检查
+   触发方式：运行 `npm run typecheck`
+   预期结果：新增 domain schema 与导出入口可通过类型检查
+   实际结果：通过；命令退出码为 0
+
+4. 验证对象：构建入口
+   触发方式：运行 `npm run build`
+   预期结果：`src/domain` 新增文件可被正常编译到 `dist/`
+   实际结果：通过；命令退出码为 0
+
+### 当前边界说明
+
+- 尚未开始任务 3；当前只冻结 domain 契约和投影边界，不实现实际落盘、脱敏、文件锁、checkpoint 写入或 side effect ledger 持久化逻辑。
+- `run_mode` 当前采用 `full`、`brief_only`、`jira_writeback_only`、`feishu_record_only` 四值，依据现有主流程与三个子工作流命名收敛；若后续上位文档显式补充其他模式，应先更新文档基线再改 schema。
+- Jira `target_type` 当前收敛为 `comment | field`，用于先固定写回契约的最小判别维度；未提前扩展更多 Jira 写入目标类型。

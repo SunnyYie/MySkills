@@ -4,7 +4,7 @@
 
 - `src/app`：应用装配层，负责把 CLI 命令组织成一次 run 级执行，并隔离 workflow 与外部资源边界。
 - `src/cli`：CLI 入口、参数解析、TTY/JSON 展示切换，不持有业务状态。
-- `src/domain`：核心对象、schema 与枚举的唯一落点，等任务 2 冻结契约后补全。
+- `src/domain`：核心对象、schema、状态枚举、错误类别与 `ExecutionContext` 投影边界的唯一落点。
 - `src/workflow`：阶段编排、审批、回退、恢复与 checkpoint 策略的唯一 owner。
 - `src/skills`：无状态结构化能力实现，输入输出遵循统一 `StageResult<T>` 契约。
 - `src/infrastructure`：唯一底层访问层。

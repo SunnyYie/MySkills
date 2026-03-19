@@ -9,10 +9,11 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "npm run test:unit && npm run test:integration && npm run test:acceptance",
+    "test": "npm run test:unit && npm run test:integration && npm run test:acceptance && npm run test:milestones",
     "test:unit": "vitest run --passWithNoTests tests/unit",
     "test:integration": "vitest run --passWithNoTests tests/integration",
     "test:acceptance": "vitest run tests/acceptance",
+    "test:milestones": "vitest run --passWithNoTests tests/milestones",
     "cli:run": "npm run build && node dist/cli/bin.js"
   },
   "dependencies": {

@@ -1,0 +1,282 @@
+{
+  "levels": {
+    "taskLevelDirectories": [
+      "tests/unit",
+      "tests/integration"
+    ],
+    "taskGroupDirectory": "tests/acceptance",
+    "milestoneDirectory": "tests/milestones"
+  },
+  "tasks": {
+    "1": [
+      "tests/acceptance/task1-project-skeleton.spec.ts"
+    ],
+    "2": [
+      "tests/unit/domain/contracts.spec.ts"
+    ],
+    "3": [
+      "tests/unit/storage/persistence-foundation.spec.ts",
+      "tests/unit/security/redaction.spec.ts"
+    ],
+    "4": [
+      "tests/unit/workflow/state-machine.spec.ts"
+    ],
+    "5": [
+      "tests/unit/app/run-lifecycle.spec.ts"
+    ],
+    "6": [
+      "tests/unit/config/config-loader.spec.ts",
+      "tests/integration/cli/config-commands.spec.ts"
+    ],
+    "7": [
+      "tests/unit/intake/jira-intake.spec.ts",
+      "tests/unit/intake/project-context.spec.ts"
+    ],
+    "8": [
+      "tests/unit/requirement-brief/requirement-brief.spec.ts"
+    ],
+    "9": [
+      "tests/unit/code-locator/code-locator.spec.ts"
+    ],
+    "10": [
+      "tests/unit/fix-planner/fix-planner.spec.ts"
+    ],
+    "11": [
+      "tests/unit/execution/execution.spec.ts",
+      "tests/unit/gitlab-linker/gitlab-linker.spec.ts",
+      "tests/unit/verification-recorder/verification-recorder.spec.ts"
+    ],
+    "12": [
+      "tests/unit/jira-writeback/jira-writeback.spec.ts"
+    ],
+    "13": [
+      "tests/unit/feishu-writeback/feishu-writeback.spec.ts"
+    ],
+    "14": [
+      "tests/unit/report/report-writer.spec.ts"
+    ],
+    "15": [
+      "tests/integration/cli/config-commands.spec.ts",
+      "tests/integration/cli/run-record-commands.spec.ts"
+    ],
+    "16": [
+      "tests/acceptance/task16-regression-coverage.spec.ts",
+      "tests/milestones/document-consistency.spec.ts",
+      "tests/milestones/milestone-regressions.spec.ts"
+    ]
+  },
+  "acceptanceScenarios": [
+    {
+      "id": 1,
+      "name": "标准主流程",
+      "coverage": [
+        "tests/unit/intake/jira-intake.spec.ts",
+        "tests/unit/intake/project-context.spec.ts",
+        "tests/unit/requirement-brief/requirement-brief.spec.ts",
+        "tests/unit/code-locator/code-locator.spec.ts",
+        "tests/unit/fix-planner/fix-planner.spec.ts",
+        "tests/unit/execution/execution.spec.ts",
+        "tests/unit/jira-writeback/jira-writeback.spec.ts",
+        "tests/unit/feishu-writeback/feishu-writeback.spec.ts",
+        "tests/unit/report/report-writer.spec.ts"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "审批分支",
+      "coverage": [
+        "tests/unit/workflow/state-machine.spec.ts",
+        "tests/integration/cli/writeback-flows.spec.ts"
+      ]
+    },
+    {
+      "id": 3,
+      "name": "配置缺失补录",
+      "coverage": [
+        "tests/unit/config/config-loader.spec.ts",
+        "tests/unit/app/run-lifecycle.spec.ts",
+        "tests/integration/cli/config-commands.spec.ts"
+      ]
+    },
+    {
+      "id": 4,
+      "name": "dry-run 与真实写入",
+      "coverage": [
+        "tests/integration/cli/writeback-flows.spec.ts",
+        "tests/unit/jira-writeback/jira-writeback.spec.ts",
+        "tests/unit/feishu-writeback/feishu-writeback.spec.ts"
+      ]
+    },
+    {
+      "id": 5,
+      "name": "中断恢复",
+      "coverage": [
+        "tests/unit/app/run-lifecycle.spec.ts",
+        "tests/integration/cli/run-record-commands.spec.ts"
+      ]
+    },
+    {
+      "id": 6,
+      "name": "部分成功与重试去重",
+      "coverage": [
+        "tests/unit/workflow/state-machine.spec.ts",
+        "tests/unit/report/report-writer.spec.ts",
+        "tests/unit/jira-writeback/jira-writeback.spec.ts",
+        "tests/unit/feishu-writeback/feishu-writeback.spec.ts"
+      ]
+    },
+    {
+      "id": 7,
+      "name": "需求映射歧义处理",
+      "coverage": [
+        "tests/unit/intake/project-context.spec.ts",
+        "tests/unit/requirement-brief/requirement-brief.spec.ts",
+        "tests/unit/jira-writeback/jira-writeback.spec.ts",
+        "tests/unit/feishu-writeback/feishu-writeback.spec.ts"
+      ]
+    },
+    {
+      "id": 8,
+      "name": "子工作流独立验收",
+      "coverage": [
+        "tests/integration/cli/run-record-commands.spec.ts",
+        "tests/integration/cli/writeback-flows.spec.ts"
+      ]
+    }
+  ],
+  "milestones": [
+    {
+      "id": 1,
+      "name": "里程碑 1：项目骨架、domain schema、storage/security 基础可用",
+      "gate": "任务 1 到 3 的骨架、契约、持久化与脱敏测试全部通过。",
+      "coverage": [
+        "tests/acceptance/task1-project-skeleton.spec.ts",
+        "tests/unit/domain/contracts.spec.ts",
+        "tests/unit/storage/persistence-foundation.spec.ts",
+        "tests/unit/security/redaction.spec.ts"
+      ],
+      "coversTasks": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "id": 2,
+      "name": "里程碑 2：Intake、Context Resolution、Requirement Synthesis 可走通",
+      "gate": "前 3 个分析阶段的 unit/integration 回归通过，并可稳定产出 Requirement Brief。",
+      "coverage": [
+        "tests/unit/intake/jira-intake.spec.ts",
+        "tests/unit/intake/project-context.spec.ts",
+        "tests/unit/requirement-brief/requirement-brief.spec.ts",
+        "tests/integration/cli/config-commands.spec.ts"
+      ],
+      "coversTasks": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8
+      ]
+    },
+    {
+      "id": 3,
+      "name": "里程碑 3：Code Localization、Fix Planning、Execution 可走通",
+      "gate": "代码定位、修复计划、Execution 补录标准化均有稳定回归入口。",
+      "coverage": [
+        "tests/unit/code-locator/code-locator.spec.ts",
+        "tests/unit/fix-planner/fix-planner.spec.ts",
+        "tests/unit/execution/execution.spec.ts",
+        "tests/unit/gitlab-linker/gitlab-linker.spec.ts",
+        "tests/unit/verification-recorder/verification-recorder.spec.ts"
+      ],
+      "coversTasks": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11
+      ]
+    },
+    {
+      "id": 4,
+      "name": "里程碑 4：Jira/飞书 preview、审批、execute、去重、恢复可走通",
+      "gate": "写回链路与共享恢复语义具备 unit 和 CLI integration 双层回归。",
+      "coverage": [
+        "tests/unit/jira-writeback/jira-writeback.spec.ts",
+        "tests/unit/feishu-writeback/feishu-writeback.spec.ts",
+        "tests/integration/cli/run-record-commands.spec.ts",
+        "tests/integration/cli/writeback-flows.spec.ts"
+      ],
+      "coversTasks": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13
+      ]
+    },
+    {
+      "id": 5,
+      "name": "里程碑 5：完整主流程、三个子工作流、8 个验收场景全部覆盖",
+      "gate": "任务 1 到 16 的验证入口齐备，8 个验收场景与文档一致性都可追踪。",
+      "coverage": [
+        "tests/unit/report/report-writer.spec.ts",
+        "tests/integration/cli/config-commands.spec.ts",
+        "tests/integration/cli/run-record-commands.spec.ts",
+        "tests/integration/cli/writeback-flows.spec.ts",
+        "tests/acceptance/task16-regression-coverage.spec.ts",
+        "tests/milestones/document-consistency.spec.ts",
+        "tests/milestones/milestone-regressions.spec.ts"
+      ],
+      "coversTasks": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16
+      ]
+    }
+  ],
+  "documentConsistency": {
+    "documents": [
+      "memory-bank/需求文档.md",
+      "memory-bank/技术方案.md",
+      "memory-bank/实施计划.md",
+      "AGENTS.md"
+    ],
+    "knownAssumptions": [
+      "任务 16 以测试追踪矩阵证明验收覆盖，不额外引入超出 v1 范围的真实外部副作用。",
+      "标准主流程场景当前通过跨模块测试链路追踪 Requirement Brief、写回草稿与报告导出，而不是伪造一个未在 v1 已实现范围内的全自动端到端命令。",
+      "文档一致性检查以命令组、阶段命名、v1 非目标和 AGENTS 约束链路为最小基线；若后续文档引入新术语，需要同步扩展该校验。 "
+    ]
+  }
+}

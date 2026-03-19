@@ -818,3 +818,61 @@
 - 尚未开始任务 16；当前只补齐 CLI 命令树、子工作流 run 初始化和最小共享状态/恢复接线，不扩展到需求验收矩阵、三层回归结构或最终文档一致性巡检。
 - 当前 `run approve/reject/revise/provide-artifact/provide-verification/preview-write/execute-write` 已具备最小持久化入口与稳定输出，但仍属于任务 15 的“CLI 命令面接线”层级：它们复用已有 workflow / storage 语义，不代表已经完成任务 16 的端到端恢复场景覆盖。
 - 当前 write preview / execute 在 CLI 侧只落最小 preview / result artifact 与 checkpoint 更新，用于固定命令边界和状态语义；真实外部 connector 调用、side-effect ledger 全链路持久化与需求验收级场景映射仍由后续端到端验证任务承接。
+
+## 2026-03-19 - 任务 16：端到端恢复、回归与文档同步
+
+### 本轮完成内容
+
+- 新增 `tests/acceptance/task16-regression-coverage.spec.ts`、`tests/milestones/milestone-regressions.spec.ts`、`tests/milestones/document-consistency.spec.ts` 与 `tests/milestones/regression-plan.json`，把任务 16 要求的三层验证结构正式落地：任务级入口继续落在 `tests/unit` / `tests/integration`，任务组级入口固定为 `tests/acceptance`，里程碑级回归与文档一致性检查固定为 `tests/milestones`。
+- 在 `tests/milestones/regression-plan.json` 中建立任务 1 到 16 的最小回归入口映射、需求文档 8 个验收场景到测试路径的追踪矩阵、以及实施计划要求的 5 个里程碑回归门槛；同时把任务 16 允许采用“跨模块测试链路追踪标准主流程而不伪造未实现全自动主命令”的已知假设显式记录下来。
+- 新增 `tests/integration/cli/writeback-flows.spec.ts`，补齐此前缺失的 CLI 回归：覆盖 `record jira` 子工作流经由共享 run 生命周期完成 artifact / verification 补录、dry-run preview、审批、非交互 execute 的路径，以及 `record feishu` 子工作流在不依赖完整主流程时独立完成 preview / approve / execute 的路径。
+- 更新 `tests/README.md` 与根级 `package.json`，把 `tests/milestones` 和 `test:milestones` 纳入正式测试约定与聚合入口，让里程碑回归不再只是文档说明，而是 `npm test` 的一部分。
+
+### 依据
+
+- 用户指令：阅读所有 `memory-bank` 文档并继续执行实施计划任务 16；每在验证测试结果之前不得开始下一个任务；测试验证通过后更新 `progress.md` 供其他开发人员参考，再补充 `architecture.md` 中的架构见解与文件职责说明；在 worktree 代码测试通过后合并到 `main`。
+- `memory-bank/实施计划.md` 任务 16：要求建立任务级、任务组级、里程碑级三层验证结构，将 8 个验收场景映射到测试套件，定义 5 个里程碑回归，并同步检查需求文档、技术方案、实施计划与 AGENTS 的术语一致性与已知假设。
+- `memory-bank/需求文档.md`：
+  - “验收标准”：8 个验收场景必须全部可追踪到验证路径，尤其包括审批分支、配置缺失补录、dry-run/真实写入、中断恢复、部分成功与子工作流独立验收。
+  - “成功指标”：恢复执行成功率与 dry-run 覆盖率都属于最终交付口径，因此任务 16 的回归入口需要把恢复和写回链路纳入正式测试体系。
+- `memory-bank/技术方案.md`：
+  - “CLI 设计” 与 “子工作流”：`record` 不得绕过统一 workflow，子工作流应共享审批、错误和结果记录语义，因此任务 16 需要把 `record jira` / `record feishu` 的 CLI integration 回归补齐。
+  - “方案总结” 与 “Renderers/Workflow owner 约束”：阶段命名、命令组、分层职责与 v1 非目标必须保持一致，不能让进度文档或临时实现漂移出上位文档约束。
+
+### 验证记录
+
+1. 验证对象：任务 16 红灯起点
+   触发方式：先运行 `npm run test:acceptance -- tests/acceptance/task16-regression-coverage.spec.ts`
+   预期结果：在未补齐 `tests/milestones`、追踪矩阵与里程碑脚本前明确失败，而不是误绿
+   实际结果：通过；首轮失败准确暴露 `tests/README.md` 尚未声明 `tests/milestones`，且缺少 `tests/milestones/regression-plan.json`，证明任务 16 的测试先锁定了真实缺口
+
+2. 验证对象：任务 16 CLI 写回与子工作流 integration 回归
+   触发方式：运行 `npm run test:integration -- tests/integration/cli/writeback-flows.spec.ts`
+   预期结果：`record jira` 能共享 run 生命周期完成补录、dry-run preview、审批与 execute，`record feishu` 能独立完成 preview / approve / execute
+   实际结果：通过；`tests/integration/cli/writeback-flows.spec.ts` 2 项断言全部通过，补齐了此前未覆盖的 `record feishu` 子工作流与 writeback 命令链路
+
+3. 验证对象：任务 16 三层验证结构与里程碑文档一致性
+   触发方式：运行 `npm run test:acceptance -- tests/acceptance/task16-regression-coverage.spec.ts` 与 `npm run test:milestones`
+   预期结果：16 个任务组、8 个验收场景、5 个里程碑和 4 份文档一致性检查范围都能被解析并验证通过
+   实际结果：通过；acceptance 7/7 通过，milestones 3/3 通过
+
+4. 验证对象：全量测试聚合入口
+   触发方式：运行 `npm test`
+   预期结果：新增 `test:milestones` 被纳入根级测试入口，任务 1-16 的既有 unit / integration / acceptance 回归继续通过
+   实际结果：通过；unit 共 66/66 通过，integration 共 7/7 通过，acceptance 共 7/7 通过，milestones 共 3/3 通过
+
+5. 验证对象：TypeScript 类型检查
+   触发方式：运行 `npm run typecheck`
+   预期结果：新增 tests 夹具、CLI integration 回归与里程碑校验可通过类型检查
+   实际结果：通过；命令退出码为 0
+
+6. 验证对象：构建入口
+   触发方式：运行 `npm run build`
+   预期结果：新增任务 16 改动不破坏 TypeScript 构建输出
+   实际结果：通过；命令退出码为 0
+
+### 当前边界说明
+
+- 任务 16 的“标准主流程”目前采用跨模块测试链路追踪：用 Intake / Requirement Brief / Code Localization / Fix Planning / Execution / Jira / Feishu / Report 的现有测试共同证明闭环能力，而不是伪造一个仓库中尚未落地的“全自动单命令主流程”。这一点已作为已知假设写入 `tests/milestones/regression-plan.json`。
+- 当前新增的 CLI integration 仍只验证本地持久化、checkpoint 与共享状态语义，不触发真实 Jira / Feishu 网络副作用，也不把 task 12/13 的纯规则层越权扩展成外部写入实现。
+- `progress.md` 与 `architecture.md` 继续作为实施跟踪与架构说明补充材料，不反向覆盖需求文档、技术方案与实施计划的上位约束。

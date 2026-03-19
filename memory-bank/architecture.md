@@ -854,3 +854,61 @@
 - `record` 被实现成“最小 run 初始化”的快捷入口，而不是直接触发 Jira/Feishu 写回，是这一步最关键的边界保护。这样子工作流依然共享相同的 checkpoint、恢复、审批与 stage status 语义，符合需求文档和技术方案里“不绕过 workflow”的要求。
 - `brief_only` / `jira_writeback_only` / `feishu_record_only` 的 preset 都收敛在 app 层，而没有散落在各个 CLI 命令处理器里。这让“哪些阶段应该 `skipped`、哪些阶段应该从 `waiting_external_input` 起步”成为一处可测的事实，而不是多个命令分支里的隐含约定。
 - 当前 preview / execute 在 CLI 侧只落最小 preview/result artifact 与 checkpoint，同步固定了命令边界，但没有提前越权去实现任务 16 的验收矩阵或真实外部副作用编排。换句话说，任务 15 的价值是先把入口和语义钉住，而不是假装端到端问题已经全部解决。
+
+## 任务 16 当前端到端回归与文档同步层
+
+任务 16 完成后，仓库第一次把“实现是否完整”这件事收敛成了可执行资产，而不是散落在 `progress.md` 里的人工说明。这个阶段的重点不是新增业务能力，而是把任务级、任务组级、里程碑级三层验证结构钉住，让 16 个任务、8 个验收场景、5 个里程碑门槛，以及需求/方案/计划/AGENTS 的术语一致性都能被 CI 风格的命令重复验证。
+
+## 新增与变更文件职责
+
+### `tests/acceptance/task16-regression-coverage.spec.ts`
+
+- 这是任务 16 的主验收测试，也是本轮最核心的新文件。
+- 它不直接模拟某一个业务阶段，而是验证“验证体系本身”：检查 `tests/README.md` 是否声明三层结构、`package.json` 是否暴露 `test:milestones`、`tests/milestones/regression-plan.json` 是否为 16 个任务和 8 个验收场景都提供了最小可执行入口。
+- 这个文件把“回归缺口”变成了显式失败条件，避免未来只补实现、不补测试映射时没有任何报警。
+
+### `tests/milestones/regression-plan.json`
+
+- 这是任务 16 新增的测试追踪矩阵事实源。
+- 文件集中记录三类信息：任务 1-16 到测试文件的映射、需求文档 8 个验收场景到测试路径的映射、以及 5 个里程碑的 coverage/gate/coversTasks 定义。
+- 它还显式保存任务 16 的已知假设，例如“标准主流程当前通过跨模块测试链路证明，而不是伪造一个未实现的全自动单命令入口”，让后续维护者能区分既有能力边界和未来扩展方向。
+
+### `tests/milestones/milestone-regressions.spec.ts`
+
+- 这是任务 16 的里程碑门禁测试。
+- 它负责验证 5 个里程碑是否递进、是否没有跳级，以及最终里程碑是否覆盖任务 1 到 16。
+- 这个文件的价值不在于执行业务逻辑，而在于冻结“我们如何宣称一个阶段完成”的回归口径，防止里程碑定义随进度漂移。
+
+### `tests/milestones/document-consistency.spec.ts`
+
+- 这是任务 16 的文档一致性执行器。
+- 它读取 `memory-bank/需求文档.md`、`memory-bank/技术方案.md`、`memory-bank/实施计划.md` 与 `AGENTS.md`，检查命令组、阶段名、v1 非目标和 AGENTS 约束链路是否仍然使用同一套术语。
+- 把这层检查做成测试，而不是停留在人工 review，可以更早发现“代码已经这么写了，但文档叫法变了”的漂移。
+
+### `tests/integration/cli/writeback-flows.spec.ts`
+
+- 这是任务 16 新增的 CLI integration 回归。
+- 它补上了任务 15 没有覆盖到的两条关键路径：`record jira` 经由共享 run 生命周期完成 artifact / verification 补录、dry-run preview、审批和非交互 execute；`record feishu` 则证明飞书子工作流能不依赖完整主流程独立完成 preview / approve / execute。
+- 这组测试让任务 16 的验收矩阵不只是“引用旧测试”，而是确实补齐了此前子工作流和写回链路的真实缺口。
+
+### `tests/README.md`
+
+- 在原有 `unit / integration / acceptance` 说明上，任务 16 把 `tests/milestones` 正式提升为一等测试层级。
+- 这个文件现在不仅描述目录用途，还说明三层验证结构的 owner：任务级入口落在 `unit / integration`，任务组级入口落在 `acceptance`，里程碑级入口落在 `tests/milestones` 与追踪矩阵。
+
+### `package.json`
+
+- 任务 16 只对测试脚本做了最小但关键的收敛：新增 `test:milestones`，并把它并入根级 `npm test`。
+- 这意味着里程碑回归与文档一致性不再依赖开发者记忆“最后再手动跑一次”，而是成为默认测试门禁的一部分。
+
+### `memory-bank/progress.md`
+
+- 这里记录任务 16 的实施依据、验证证据与当前边界说明，供后续开发者接手时快速判断“哪些是已经锁定的回归资产，哪些仍然只是范围声明”。
+- 这份记录保持低优先级事实源定位，不反向覆盖需求、技术方案和实施计划。
+
+## 任务 16 架构洞察
+
+- 任务 16 最重要的 owner 收敛，不在业务代码，而在“验证资产的所有权”。以前任务是否闭环，更多依赖 `progress.md` 文本描述；现在则由 `tests/milestones/regression-plan.json` 充当追踪矩阵事实源，`task16-regression-coverage.spec.ts` / `milestone-regressions.spec.ts` / `document-consistency.spec.ts` 负责把这些声明变成机器可验证的门禁。
+- 三层验证结构的设计刻意保持分工清晰：`unit / integration` 继续证明局部能力和跨层接缝，`acceptance` 负责任务组级交付门槛，`tests/milestones` 负责最终回归与文档约束。这避免了把所有责任都塞进一个“大而全”的 acceptance 测试文件里，减轻后续维护成本。
+- `writeback-flows.spec.ts` 被放在 integration，而不是 acceptance，是因为它验证的是“共享 run 生命周期 + CLI 命令接缝”这一跨层能力，而不是整个任务 16 的文档追踪矩阵。这样既补齐了真实行为缺口，也不让 acceptance 层承担过多业务细节。
+- 任务 16 选择用“跨模块测试链路追踪标准主流程”而不是捏造一个未实现的全自动单命令 happy path，是一次刻意的边界保护。它忠实反映了 v1 当前实现形态，避免为了追求看上去更完整的 E2E 演示而在测试中暗藏并不存在的系统能力。

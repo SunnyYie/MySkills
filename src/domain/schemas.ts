@@ -331,9 +331,13 @@ export const FeishuRecordDraftSchema = z
     template_id: NonEmptyStringSchema,
     template_version: NonEmptyStringSchema,
     write_mode: FeishuWriteModeSchema,
+    target_ref: NonEmptyStringSchema,
     rendered_preview: NonEmptyStringSchema,
     request_payload: JsonValueSchema,
+    request_payload_hash: NonEmptyStringSchema,
     idempotency_key: NonEmptyStringSchema,
+    dedupe_scope: NonEmptyStringSchema,
+    expected_target_version: NonEmptyStringSchema.nullable(),
   })
   .strict();
 
@@ -343,6 +347,9 @@ export const FeishuRecordResultSchema = z
     target_ref: NonEmptyStringSchema,
     target_version: NonEmptyStringSchema,
     result_url: UrlSchema,
+    already_applied: z.boolean(),
+    external_request_id: NonEmptyStringSchema.nullable(),
+    updated_at: TimestampSchema,
   })
   .strict();
 
@@ -617,6 +624,8 @@ export type VerificationCheck = z.infer<typeof VerificationCheckSchema>;
 export type VerificationResult = z.infer<typeof VerificationResultSchema>;
 export type JiraWritebackDraft = z.infer<typeof JiraWritebackDraftSchema>;
 export type JiraWritebackResult = z.infer<typeof JiraWritebackResultSchema>;
+export type FeishuRecordDraft = z.infer<typeof FeishuRecordDraftSchema>;
+export type FeishuRecordResult = z.infer<typeof FeishuRecordResultSchema>;
 export type RepoSelection = z.infer<typeof RepoSelectionSchema>;
 export type StageResultStatus = z.infer<typeof StageResultStatusSchema>;
 export type StageResult<T> = {

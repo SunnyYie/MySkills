@@ -654,3 +654,59 @@
 - 尚未开始任务 13；当前只实现 Jira preview / execute 链路的纯契约与纯规则层，不进入 Feishu preview / append 写入链路。
 - 当前 Jira 写回仍停留在 connector 纯映射与 workflow 纯规则层：不发真实网络请求、不写 `side-effects.ndjson`、不接 checkpoint 持久化，也不注册 CLI `preview-write` / `execute-write` 命令。
 - 当前 preview draft 中的 `request_payload` 是为审批和 execute 输入对齐服务的脱敏 payload 形态；真正“默认不落原始 request_payload、只落 hash 与 preview”的 storage 策略仍由后续持久化接线任务承接。
+
+## 2026-03-19 - 任务 13：实现飞书 preview 与写入执行链路
+
+### 本轮完成内容
+
+- 在 `src/domain/schemas.ts` 中补齐任务 13 所需的 Feishu 写入契约：为 `FeishuRecordDraftSchema` 新增 `target_ref`、`request_payload_hash`、`dedupe_scope`、`expected_target_version`，为 `FeishuRecordResultSchema` 新增 `already_applied`、`external_request_id`、`updated_at`，并补出 `FeishuRecordDraft`、`FeishuRecordResult` type export，使飞书 preview / execute 与 Jira 一样具备审批绑定、幂等和恢复所需字段面。
+- 在 `src/infrastructure/connectors/feishu/index.ts` 中新增 Feishu connector 的最小纯映射能力：`buildFeishuRecordPreviewDraft()` 负责把项目画像中的飞书目标、Jira issue 摘要、需求绑定结果、GitLab 产物、验证结果 ref、根因摘要和修复计划收敛为稳定 preview draft，自动注入 append marker、生成 `rendered_preview`、`request_payload_hash`、`idempotency_key`、`dedupe_scope` 和显式 `target_ref`；`createFeishuExecuteResult()` / `createFeishuAlreadyAppliedResult()` 负责把真实写入结果和查重命中结果标准化为统一 `FeishuRecordResult`。
+- 在 `src/workflow/feishu-writeback.ts` 中实现任务 13 的 workflow 纯规则层：`createFeishuRecordPreviewState()` 负责刷新 preview、回写 `feishu_record_draft_ref`、计算 `previewHash` 并使旧审批失效；`guardFeishuRecordRequirementBinding()` 负责在真实飞书写入前执行 requirement binding 强约束阻塞，同时允许弱约束项目继续写入并在 preview 中显式标记“未绑定需求”；`buildFeishuRecordPreparedEntry()`、`markFeishuRecordEntryDispatched()`、`finalizeFeishuRecordEntry()` 固定 `prepared -> dispatched -> terminal` 的飞书副作用账本顺序；`shouldSkipFeishuRecordExecution()` 负责 dry-run 与 append 已写入场景的去重跳过判定。
+- 更新 `src/infrastructure/connectors/index.ts` 与 `src/workflow/index.ts` 暴露 Feishu writeback 能力，保持 infrastructure / workflow 公共面稳定，不让调用方深引内部文件。
+- 新增 `tests/unit/feishu-writeback/feishu-writeback.spec.ts`，并扩展 `tests/unit/domain/contracts.spec.ts`，通过红绿测试锁定 Feishu preview 草稿、requirement binding 强约束阻塞、未绑定需求显式标记、preview 刷新与旧审批失效、approval preview 绑定、append ledger 顺序、dry-run 边界与已写入不重复 append 的最小闭环。
+
+### 依据
+
+- 用户指令：阅读所有 `memory-bank` 文档并继续执行实施计划任务 13；每在验证测试结果之前不得开始下一个任务；测试验证通过后更新 `progress.md` 和 `architecture.md`；在此之前不进入任务 14；在 worktree 代码测试通过后合并到 `main`。
+- `memory-bank/实施计划.md` 任务 13：要求建立 Feishu preview、requirement binding 强约束阻塞、append marker 与 preview 绑定、失败现场保留语义、append 去重与恢复优先 reconcile 的完整链路。
+- `memory-bank/需求文档.md`：
+  - “飞书集成需求” 与 “飞书写入契约要求”：飞书记录至少承载 requirement / Jira / GitLab / 根因 / 解决方案 / 验证结果，并支持 preview、独立补写、`space_id` / `doc_id` / `block_id_or_anchor` / `template_version` / `request_payload` / `idempotency_key` / `result_url` 等最小契约字段。
+  - “未绑定需求处理策略”：弱约束项目允许继续写入，但飞书记录必须显式标记“未绑定需求”；强约束项目在外部写回前必须阻塞。
+  - “错误处理需求” 与“部分成功语义”：Jira 成功、飞书失败时需要保留现场并支持只重试失败阶段。
+- `memory-bank/技术方案.md`：
+  - “11.4 飞书 Connector”：preview / execute input、append marker、`dedupe_scope`、`expected_target_version`、`already_applied` / `external_request_id` 等结果字段。
+  - “12.4 审计与副作用账本”：Jira/飞书真实写入都必须遵守 `prepared -> dispatched -> terminal` 的固定顺序。
+  - “13.3 命令语义约束” 与恢复设计：preview 审批必须绑定不可变 `preview_ref`，`outcome_unknown` 或未终态副作用恢复时必须先 reconcile 再决定是否重试。
+
+### 验证记录
+
+1. 验证对象：任务 13 红灯起点
+   触发方式：先运行 `npm run test:unit -- tests/unit/feishu-writeback/feishu-writeback.spec.ts tests/unit/domain/contracts.spec.ts`
+   预期结果：实现前因缺少 Feishu connector / workflow 入口和新增 schema 字段而失败，而不是误绿
+   实际结果：通过；首轮失败准确暴露 `src/infrastructure/connectors/feishu/index.ts` 不存在，以及 `FeishuRecordDraftSchema` 尚未接收 `target_ref` / `request_payload_hash` / `dedupe_scope` / `expected_target_version` 等任务 13 所需字段
+
+2. 验证对象：任务 13 unit 红绿闭环
+   触发方式：补实现后再次运行 `npm run test:unit -- tests/unit/feishu-writeback/feishu-writeback.spec.ts tests/unit/domain/contracts.spec.ts`
+   预期结果：preview draft、requirement binding 阻塞与弱约束标记、preview 刷新与旧审批失效、approval preview 绑定、append ledger 顺序、dry-run 跳过和已写入不重复 append 全部通过
+   实际结果：通过；`tests/unit/feishu-writeback/feishu-writeback.spec.ts` 6 项断言全部通过，更新后的 domain 契约回归通过。期间曾暴露一个测试口径问题：第一次 preview 刷新才会 supersede 旧审批，第二次刷新若未重新挂接审批则不会重复产出 superseded id，已对齐现有 Jira 不变式后重新验证通过
+
+3. 验证对象：根级测试聚合入口
+   触发方式：运行 `npm test`
+   预期结果：任务 13 新增 unit 测试通过，任务 1-12 的既有 unit / integration / acceptance 回归继续通过
+   实际结果：通过；unit 共 63/63 通过，integration `config-commands` 2/2 通过，acceptance `task1-project-skeleton` 4/4 通过
+
+4. 验证对象：TypeScript 类型检查
+   触发方式：运行 `npm run typecheck`
+   预期结果：新增 Feishu connector、workflow 规则层和 domain type export 可通过类型检查
+   实际结果：通过；命令退出码为 0
+
+5. 验证对象：构建入口
+   触发方式：运行 `npm run build`
+   预期结果：新增 `src/infrastructure/connectors/feishu/index.ts`、`src/workflow/feishu-writeback.ts` 与相关 domain 更新可正常编译到 `dist/`
+   实际结果：通过；命令退出码为 0
+
+### 当前边界说明
+
+- 尚未开始任务 14；当前只实现 Feishu preview / append execute 链路的纯契约与纯规则层，不进入 `report-writer` 与统一导出。
+- 当前 Feishu 写入仍停留在 connector 纯映射与 workflow 纯规则层：不发真实网络请求、不写 `side-effects.ndjson`、不接 checkpoint 持久化，也不注册 CLI 的 preview / execute 子命令。
+- 当前 preview draft 中保留的是审批和 execute 输入对齐所需的脱敏 payload；真正“默认不落原始 request_payload、只落 hash 与 preview”的 storage 策略，以及失败现场与 checkpoint 的物理绑定，仍由后续持久化接线任务承接。

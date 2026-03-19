@@ -268,7 +268,11 @@ describe('domain contracts', () => {
         write_mode: 'append',
         rendered_preview: 'Bugfix record preview',
         request_payload: { blocks: [] },
+        request_payload_hash: 'sha256:payload',
         idempotency_key: 'feishu:doc-1:BUG-123',
+        dedupe_scope: 'feishu:space-1:doc-1:anchor:bugfixes:append',
+        expected_target_version: null,
+        target_ref: 'feishu://space-1/doc/doc-1/anchor/bugfixes',
       }).success,
     ).toBe(true);
 
@@ -278,6 +282,9 @@ describe('domain contracts', () => {
         target_ref: 'feishu://doc-1/block/bugfixes',
         target_version: '3',
         result_url: 'https://feishu.example.com/doc/doc-1',
+        already_applied: false,
+        external_request_id: 'req-feishu-1',
+        updated_at: '2026-03-19T10:30:00.000Z',
       }).success,
     ).toBe(true);
   });

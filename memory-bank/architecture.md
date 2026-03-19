@@ -696,3 +696,60 @@
 - requirement binding 强约束检查被刻意放在 Jira execute 前，而不是前移到 `Requirement Synthesis` 或 `Execution`。这样既遵守需求文档里“允许分析继续推进”的策略，也确保强约束项目不会把 unresolved requirement 带进真实外部写回。
 - `already_applied` 被做成 `JiraWritebackResult` 的一等字段，而不是只靠调用方读日志猜测，是为了把“查重命中后不应重复写”表达成标准结果，而不是隐含分支。
 - 这轮仍然没有接真实 connector execute、ledger 落盘和 checkpoint 写入，是刻意保持小步闭环：先把 preview / approval / dedupe / ledger 语义冻结下来，后续再把这些纯规则接到 storage 与 CLI，用更少的返工完成真实写回链路。
+
+## 任务 13 当前 Feishu preview / append 写入层
+
+任务 13 完成后，仓库里第一次把 Feishu 记录从“domain 里已有 draft/result 占位”落成了和 Jira 对称的 preview / execute 纯契约链路。这个阶段仍然不触发真实飞书网络写入，只负责把 append 目标解析、preview 生成、审批绑定、requirement binding 阻塞、ledger 顺序和去重跳过规则固定下来。
+
+## 新增文件职责
+
+### `src/domain/schemas.ts`
+
+- 在既有 Feishu draft/result 契约上补齐任务 13 需要的 execute 衔接字段，而不是再发明一套平行的“Feishu preview DTO”。
+- `FeishuRecordDraftSchema` 现在显式承载 `target_ref`、`request_payload_hash`、`dedupe_scope`、`expected_target_version`，让 Feishu preview 和 Jira preview 一样，既能给人审批，也能直接衔接 execute 输入与副作用账本。
+- `FeishuRecordResultSchema` 现在显式承载 `already_applied`、`external_request_id`、`updated_at`，为 append 去重、恢复 reconcile 和“部分成功后只重试失败阶段”提供统一输出面。
+- 同时补出 `FeishuRecordDraft`、`FeishuRecordResult` type export，避免 connector 与 workflow 自己复制类型定义。
+
+### `src/infrastructure/connectors/feishu/index.ts`
+
+- 这是任务 13 新增的 Feishu connector 纯映射层。
+- `buildFeishuRecordPreviewDraft()` 负责把项目画像中的飞书目标位置、Jira issue 摘要、需求绑定状态、GitLab 产物、验证结果 ref、根因摘要和修复计划收敛成稳定 preview draft：显式生成 `target_ref`、append marker、`rendered_preview`、`request_payload_hash`、`idempotency_key` 与 `dedupe_scope`。
+- preview 文案里会在 requirement 未绑定且项目允许继续时显式写出“未绑定需求”，把需求文档的弱约束策略前移成稳定输出，而不是留给调用方补一句提示。
+- `createFeishuExecuteResult()` 与 `createFeishuAlreadyAppliedResult()` 把正常写入结果与“marker 查重发现已经追加过”的结果都折叠为统一 `FeishuRecordResult`，让 workflow 不必理解飞书响应细节。
+
+### `src/infrastructure/connectors/index.ts`
+
+- 在既有 Jira connector 之外新增 Feishu connector 的公共导出。
+- 继续保持 infrastructure 公共面聚合职责，避免上层开始手写 `feishu/index.ts` 的深路径依赖。
+
+### `src/workflow/feishu-writeback.ts`
+
+- 这是任务 13 的 Feishu writeback 纯规则层，也是本轮最核心的新文件。
+- `createFeishuRecordPreviewState()` 负责刷新当前有效 preview：更新 `feishu_record_draft_ref`、清空旧 `feishu_record_result_ref`、重算 `previewHash`、把 `Knowledge Recording` 拉回 `output_ready`，并使旧的活跃审批失效。
+- `buildFeishuRecordApprovalRecord()` 把审批记录固定绑定到 `preview_ref + preview_hash`，确保 append 写入也遵守“审批只针对当前 preview 版本”的纪律。
+- `guardFeishuRecordRequirementBinding()` 把 requirement binding 强约束阻塞点明确放在真实 Feishu execute 之前；如果项目是弱约束，它不会阻断 preview / execute 链路，而是依赖 preview 中的“未绑定需求”显式化。
+- `buildFeishuRecordPreparedEntry()`、`markFeishuRecordEntryDispatched()`、`finalizeFeishuRecordEntry()` 把 Feishu append 的 `prepared -> dispatched -> terminal` ledger 顺序收敛为显式规则，保持与 Jira 对称。
+- `shouldSkipFeishuRecordExecution()` 把 dry-run 和已终态/已对账 append 的去重规则收敛为统一判定，防止恢复或重试时重复追加同一条记录。
+
+### `src/workflow/index.ts`
+
+- 在既有 state machine、execution、jira-writeback 规则之外，新增对 `feishu-writeback.ts` 的公共导出。
+- 保持 workflow 层统一公共面，让 app、CLI 和测试继续只依赖一个稳定入口。
+
+### `tests/unit/feishu-writeback/feishu-writeback.spec.ts`
+
+- 任务 13 的核心单元测试。
+- 锁定六个最小闭环：preview draft 生成、requirement binding 强约束阻塞与弱约束“未绑定需求”显式标记、preview 刷新与旧审批失效、approval preview 绑定、append ledger 顺序、dry-run 与已写入去重边界。
+- 这组测试让任务 13 的行为有了独立落点，而不是把 Feishu 规则混进 Jira 或 domain 回归里一起“顺便验证”。
+
+### `tests/unit/domain/contracts.spec.ts`
+
+- 在既有 domain 契约测试中补上 Feishu draft/result 的字段回归。
+- 它负责防止后续把 `target_ref`、`request_payload_hash`、`dedupe_scope`、`already_applied`、`external_request_id` 等恢复与幂等关键字段退化回“调用方自己拼”的弱约束形态。
+
+## 任务 13 架构洞察
+
+- 任务 13 延续了任务 12 的 owner 划分，但 Feishu 比 Jira 多了一层 append 语义，所以这一步最重要的不是“再写一套对称代码”，而是把 append marker、target 解析和 `already_applied` 结果表达成一等公民。这样恢复逻辑以后就能靠标准结果和 ledger 做判断，而不是靠字符串搜索历史文档内容。
+- Feishu preview 里显式携带“未绑定需求”不是展示细节，而是策略落点：弱约束项目允许继续写，但必须把未绑定事实写进知识沉淀物本身。把这件事放在 connector 生成 preview 时完成，能避免 CLI、renderer 或未来真实 execute 入口各自补文案导致漂移。
+- `target_ref` 和 `dedupe_scope` 被提升为 Feishu draft 的必填字段后，Feishu 的 preview / approval / execute / reconcile 终于和 Jira 使用同一套中间态模型。这意味着后续 task 14 的 report 和更后面的 storage/CLI 接线可以按统一方式消费“外部写回草稿”和“外部写回结果”。
+- 本轮仍然没有接真实飞书 API、checkpoint 或 side-effects 落盘，是刻意保持小步闭环：先把 append 语义、审批绑定和去重规则冻结，再把这些纯规则接到真实 I/O；这样能在进入任务 14 前先确保 Feishu 链路的架构边界已经稳定。

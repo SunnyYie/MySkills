@@ -142,6 +142,7 @@ const createContext = (
   initiator: 'user:sunyi',
   started_at: TIMESTAMP,
   updated_at: TIMESTAMP,
+  active_bug_issue_key: 'BUG-123',
   jira_issue_snapshot_ref: 'artifact://jira/BUG-123',
   requirement_refs: [
     requirementBindingStatus === 'resolved'
@@ -186,6 +187,10 @@ const createContext = (
       created_at: TIMESTAMP,
     },
   ],
+  jira_subtask_ref: null,
+  jira_subtask_result_ref: null,
+  git_branch_binding_ref: null,
+  git_commit_binding_refs: [],
   jira_writeback_draft_ref: 'artifact://jira/draft-v1',
   jira_writeback_result_ref: 'artifact://jira/result-v1',
   feishu_record_draft_ref: 'artifact://feishu/draft-v1',

@@ -161,6 +161,11 @@ describe('storage foundation', () => {
     expect(AUDIT_EVENT_ALLOWLIST).toContain('request_payload_hash');
     expect(AUDIT_EVENT_ALLOWLIST).not.toContain('request_payload');
     expect(EXECUTION_CONTEXT_ALLOWLIST).not.toContain('request_payload');
+    expect(EXECUTION_CONTEXT_ALLOWLIST).toContain('active_bug_issue_key');
+    expect(EXECUTION_CONTEXT_ALLOWLIST).toContain('jira_subtask_ref');
+    expect(EXECUTION_CONTEXT_ALLOWLIST).toContain('jira_subtask_result_ref');
+    expect(EXECUTION_CONTEXT_ALLOWLIST).toContain('git_branch_binding_ref');
+    expect(EXECUTION_CONTEXT_ALLOWLIST).toContain('git_commit_binding_refs');
 
     expect(DRY_RUN_PERSISTENCE_POLICY).toEqual({
       persistPreviewArtifactsByDefault: true,

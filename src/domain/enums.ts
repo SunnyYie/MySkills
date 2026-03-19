@@ -163,6 +163,42 @@ export const ERROR_CATEGORY_POLICIES = {
   },
 } as const;
 
+export const V2_RUNTIME_FIELD_CARRIERS = {
+  active_bug_issue_key: {
+    context: 'context.json',
+    payload: 'bug_issue_key_only',
+  },
+  jira_subtask_ref: {
+    context: 'context.json',
+    artifact: 'artifact://jira/subtasks/preview/<id>',
+    payload: 'artifact_ref_only',
+  },
+  jira_subtask_result_ref: {
+    context: 'context.json',
+    artifact: 'artifact://jira/subtasks/result/<id>',
+    payload: 'artifact_ref_only',
+  },
+  git_branch_binding_ref: {
+    context: 'context.json',
+    artifact: 'artifact://jira/bindings/branch/<id>',
+    payload: 'artifact_ref_only',
+  },
+  git_commit_binding_refs: {
+    context: 'context.json',
+    artifact: 'artifact://jira/bindings/commit/<id>',
+    payload: 'artifact_ref_list_only',
+  },
+  artifactBodies: {
+    artifact: 'artifacts/',
+    payload: 'preview_payloads_execute_results_human_readable_summaries',
+  },
+  ledgerEntries: {
+    ledger: 'side-effects.ndjson',
+    payload:
+      'idempotency_key_dedupe_scope_request_payload_hash_target_ref_expected_target_version_result_ref_status_attempt_no_already_applied_external_request_id_executed_at',
+  },
+} as const;
+
 export const EXECUTION_CONTEXT_STORAGE_PROJECTION = {
   context: [
     'run_id',
@@ -179,6 +215,7 @@ export const EXECUTION_CONTEXT_STORAGE_PROJECTION = {
     'initiator',
     'started_at',
     'updated_at',
+    'active_bug_issue_key',
     'jira_issue_snapshot_ref',
     'requirement_refs',
     'repo_selection',
@@ -188,6 +225,10 @@ export const EXECUTION_CONTEXT_STORAGE_PROJECTION = {
     'verification_plan',
     'verification_results_ref',
     'gitlab_artifacts',
+    'jira_subtask_ref',
+    'jira_subtask_result_ref',
+    'git_branch_binding_ref',
+    'git_commit_binding_refs',
     'jira_writeback_draft_ref',
     'jira_writeback_result_ref',
     'feishu_record_draft_ref',

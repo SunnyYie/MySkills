@@ -36,6 +36,7 @@ const baseContext: ExecutionContext = {
   initiator: 'tester',
   started_at: '2026-03-19T07:00:00.000Z',
   updated_at: '2026-03-19T08:00:00.000Z',
+  active_bug_issue_key: 'BUG-123',
   jira_issue_snapshot_ref: 'artifact://jira/issues/BUG-123',
   requirement_refs: [
     {
@@ -80,6 +81,10 @@ const baseContext: ExecutionContext = {
       created_at: '2026-03-19T07:30:00.000Z',
     },
   ],
+  jira_subtask_ref: null,
+  jira_subtask_result_ref: null,
+  git_branch_binding_ref: null,
+  git_commit_binding_refs: [],
   jira_writeback_draft_ref: 'artifact://jira/draft-v1',
   jira_writeback_result_ref: 'artifact://jira/result-v1',
   feishu_record_draft_ref: 'artifact://feishu/draft-v1',

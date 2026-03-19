@@ -85,6 +85,7 @@ const BASE_STAGE_TRANSITIONS: Record<StageStatus, readonly StageStatus[]> = {
 const STAGE_OUTPUT_RESETS = {
   Intake: {},
   'Context Resolution': {
+    active_bug_issue_key: null,
     requirement_refs: [],
     repo_selection: null,
   },
@@ -102,6 +103,10 @@ const STAGE_OUTPUT_RESETS = {
     gitlab_artifacts: [],
   },
   'Artifact Linking': {
+    jira_subtask_ref: null,
+    jira_subtask_result_ref: null,
+    git_branch_binding_ref: null,
+    git_commit_binding_refs: [],
     jira_writeback_draft_ref: null,
     jira_writeback_result_ref: null,
   },

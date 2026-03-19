@@ -37,6 +37,7 @@ const createContext = (): ExecutionContext => ({
   initiator: 'user:sunyi',
   started_at: TIMESTAMP,
   updated_at: TIMESTAMP,
+  active_bug_issue_key: 'BUG-123',
   jira_issue_snapshot_ref: 'artifact://jira/BUG-123',
   requirement_refs: [
     {
@@ -63,6 +64,10 @@ const createContext = (): ExecutionContext => ({
   verification_plan: ['Re-run the coupon regression and capture final evidence.'],
   verification_results_ref: null,
   gitlab_artifacts: [],
+  jira_subtask_ref: null,
+  jira_subtask_result_ref: null,
+  git_branch_binding_ref: null,
+  git_commit_binding_refs: [],
   jira_writeback_draft_ref: null,
   jira_writeback_result_ref: null,
   feishu_record_draft_ref: null,

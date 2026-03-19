@@ -1,5 +1,101 @@
 # Architecture Notes
 
+## v2 任务 2 当前契约与承载边界层
+
+任务 2 完成后，v2 第一优先级新增能力终于有了稳定的运行态落点，但仍然严格停留在“契约冻结”层。这个阶段解决的是“哪些 key/ref 会进入当前有效态、哪些正文必须留在 artifact、哪些幂等与执行元数据必须进 ledger”，而不是提前实现 CLI 入口或真实 Jira 写回。
+
+## 新增/调整文件职责
+
+### `src/domain/schemas.ts`
+
+- 继续作为 domain 契约中心，这一轮新增了两类职责：
+  - 为 `ExecutionContext` 补齐 v2 新字段
+  - 为 v2 新字段与 Jira 新 side effect 定义更细的 schema
+- `active_bug_issue_key` 被建模成 nullable key，而不是直接复用 Jira snapshot artifact，是为了让 workflow/CLI 在不展开 snapshot 正文的前提下就能快速判断当前 bug 上下文。
+- `jira_subtask_ref`、`jira_subtask_result_ref`、`git_branch_binding_ref`、`git_commit_binding_refs` 不再只是“随便一个字符串 ref”，而是被收紧到明确前缀：
+  - `artifact://jira/subtasks/preview/<id>`
+  - `artifact://jira/subtasks/result/<id>`
+  - `artifact://jira/bindings/branch/<id>`
+  - `artifact://jira/bindings/commit/<id>`
+- 新增 `JIRA_V2_SIDE_EFFECT_OPERATIONS` 与 `JiraV2SideEffectLedgerEntrySchema`，让 `jira.create_subtask`、`jira.bind_branch`、`jira.bind_commit` 在 domain 层就拥有稳定命名与 `result_ref` 类型匹配规则，而不是等到 connector 层才临时解释。
+
+### `src/domain/enums.ts`
+
+- 继续承载跨层共享常量，但本轮从“纯枚举表”进一步承担“物理承载边界说明”：
+  - `EXECUTION_CONTEXT_STORAGE_PROJECTION.context` 明确 v2 新字段已进入 `context.json` allowlist
+  - `V2_RUNTIME_FIELD_CARRIERS` 明确每一类数据该落在哪个物理平面
+- 这让 domain 层不只定义“字段叫什么”，还定义“这些字段为什么能安全存在于当前有效态里”。
+
+### `src/app/run-lifecycle.ts`
+
+- 继续是 run 初始化的应用装配层。
+- 本轮只补默认态，不新增行为：
+  - `active_bug_issue_key: null`
+  - `jira_subtask_ref: null`
+  - `jira_subtask_result_ref: null`
+  - `git_branch_binding_ref: null`
+  - `git_commit_binding_refs: []`
+- 这样做的关键价值是向前兼容：任务 2 之后创建的新 run 从第一刻起就满足 v2 契约，不需要等任务 3/4 再做“补字段迁移”。
+
+### `src/workflow/state-machine.ts`
+
+- 任务 2 没有新增 workflow 入口，但它已经影响 rollback 的“该清什么”。
+- 本轮把 v2 新 ref 接进 `STAGE_OUTPUT_RESETS`，说明这些字段虽然存在于 `ExecutionContext`，依然是“阶段产物指针”，必须随着回退被清理：
+  - 回退到 `Context Resolution` 时，`active_bug_issue_key` 失效
+  - 回退到 `Artifact Linking` 时，subtask / branch / commit 绑定 ref 失效
+- 这能保证后续任务 3/4 加入真实 preview/execute 后，不会因为旧 ref 留在 context 里而造成恢复歧义。
+
+### `tests/unit/domain/contracts.spec.ts`
+
+- 现在不只验证“对象字段存在”，还开始承担 v2 契约冻结器角色：
+  - 上下文字段默认态
+  - artifact ref 前缀
+  - v2 Jira ledger operation
+  - `context.json / artifacts / side-effects.ndjson` 边界
+- 这组测试已经成为任务 2 的主防线，后续如果有人把 payload 正文重新塞回 context，或者把 branch/commit ref 前缀混用，这里会第一时间报警。
+
+### `tests/unit/storage/persistence-foundation.spec.ts`
+
+- 继续守住 storage allowlist，但现在明确知道 v2 新字段已经是 `context.json` 的合法成员。
+- 它的职责不是验证 ref 语义本身，而是验证“这些字段一旦进入有效态，就允许被安全持久化；正文仍然不允许”。
+
+### `tests/unit/app/run-lifecycle.spec.ts`
+
+- 现在保护 run 初始化不会漏掉 v2 新字段，避免出现“domain 契约更新了，但初始化 run 还是旧形状”的隐性回归。
+
+### `tests/unit/workflow/state-machine.spec.ts`
+
+- 现在保护 rollback 后 v2 ref 被清空的事实，避免未来接入真实 `ensure-subtask`、`bind-branch`、`provide-fix-commit` 时遗留过期 binding pointer。
+
+### `tests/unit/execution/execution.spec.ts`
+
+- 本轮只是跟进 `ExecutionContext` 新契约，让 Execution 外部输入逻辑继续建立在完整的有效态对象之上，不提前消费 v2 新字段。
+
+### `tests/unit/jira-writeback/jira-writeback.spec.ts`
+
+- 当前仍然测试 v1 Jira 写回流程，但通过同步 `ExecutionContext` 契约，保证旧链路可以和 v2 新字段共存，不会因为 schema 收紧而被动破坏。
+
+### `tests/unit/feishu-writeback/feishu-writeback.spec.ts`
+
+- 作用与 Jira 写回测试类似：它不实现 v2 新能力，但证明新的运行态契约不会把既有 Feishu 链路挤坏。
+
+### `tests/unit/report/report-writer.spec.ts`
+
+- 继续保护 `BugfixReport` 从“当前有效态 + ref”组装，而不是重新依赖原始正文对象；这和任务 2 强调的 key/ref 边界是一致的。
+
+## 任务 2 架构洞察
+
+- `active_bug_issue_key` 的引入，实际上把“当前 bug 是谁”从 heavyweight snapshot 中拆成了 lightweight 索引字段。这样 CLI/status/workflow 在很多分支上都不需要展开 artifact 才能决策。
+
+- `jira_subtask_ref` 和 `jira_subtask_result_ref` 被拆成 preview/result 两个 ref，而 branch/commit 只保留 binding ref，是一个刻意的不对称设计：
+  - subtask 创建本身有明确 preview -> execute 双态
+  - branch/commit 在当前计划里更像“开发关联写回记录”
+  这为任务 4 留下了足够空间，同时避免任务 2 过早发明不必要的中间对象。
+
+- `V2_RUNTIME_FIELD_CARRIERS` 放在 domain 常量而不是文档注释里，能把“架构洞察”变成可测试约束。后续任何人如果想把 `request_payload` 直接塞回 `context.json`，不仅会违反文档，也会立刻打红测试。
+
+- rollback reset 的最小接线很重要：即使这轮没有新命令入口，只要一个字段已经进入 `ExecutionContext`，就必须同时定义它何时失效，否则恢复语义会从第一天起就不完整。
+
 ## v2 任务 1 当前配置与检查层
 
 任务 1 完成后，`ProjectProfile` 不再只是 v1 的静态绑定集合，而是开始承载 Jira 子任务创建规则、branch / commit 绑定目标规则，以及 GitLab branch 绑定输入模式。这个阶段仍然严格停留在“配置表达与配置检查”层，不提前实现真实 workflow、artifact 或外部写回。

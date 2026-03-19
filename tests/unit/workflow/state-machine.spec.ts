@@ -46,6 +46,7 @@ const createContext = (): ExecutionContext => ({
   initiator: 'user:alice',
   started_at: TIMESTAMP,
   updated_at: TIMESTAMP,
+  active_bug_issue_key: 'BUG-123',
   jira_issue_snapshot_ref: 'artifact://jira/BUG-123',
   requirement_refs: [
     {
@@ -83,6 +84,10 @@ const createContext = (): ExecutionContext => ({
       created_at: TIMESTAMP,
     },
   ],
+  jira_subtask_ref: null,
+  jira_subtask_result_ref: null,
+  git_branch_binding_ref: null,
+  git_commit_binding_refs: [],
   jira_writeback_draft_ref: 'artifact://jira/draft',
   jira_writeback_result_ref: 'artifact://jira/result',
   feishu_record_draft_ref: 'artifact://feishu/draft',

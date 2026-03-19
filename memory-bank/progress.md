@@ -1,5 +1,83 @@
 # Progress
 
+## 2026-03-19 - v2 任务 2：扩展核心数据模型、artifact 与 side-effect ledger 契约
+
+### 本轮完成内容
+
+- 在 `src/domain/schemas.ts` 中扩展 `ExecutionContext`，新增并冻结以下 v2 最小字段：
+  - `active_bug_issue_key`
+  - `jira_subtask_ref`
+  - `jira_subtask_result_ref`
+  - `git_branch_binding_ref`
+  - `git_commit_binding_refs`
+- 在 `src/domain/schemas.ts` 中为上述 ref 新增明确形状约束：
+  - `artifact://jira/subtasks/preview/<id>`
+  - `artifact://jira/subtasks/result/<id>`
+  - `artifact://jira/bindings/branch/<id>`
+  - `artifact://jira/bindings/commit/<id>`
+- 在 `src/domain/schemas.ts` 中新增 `JIRA_V2_SIDE_EFFECT_OPERATIONS` 与 `JiraV2SideEffectLedgerEntrySchema`，固定：
+  - `jira.create_subtask`
+  - `jira.bind_branch`
+  - `jira.bind_commit`
+  并要求 terminal `result_ref` 与对应 artifact ref 类型匹配，避免 branch/commit/subtask 结果串用。
+- 在 `src/domain/enums.ts` 中扩展 `EXECUTION_CONTEXT_STORAGE_PROJECTION.context`，把 v2 新字段纳入 `context.json` 的允许投影。
+- 在 `src/domain/enums.ts` 中新增 `V2_RUNTIME_FIELD_CARRIERS`，显式记录：
+  - `active_bug_issue_key` 只在 `context.json` 保存短 key
+  - subtask / branch / commit 只在 `context.json` 保存 artifact ref
+  - preview / execute 正文与可读摘要进入 `artifacts/`
+  - 幂等、dedupe、payload hash、target/result ref、状态和尝试次数进入 `side-effects.ndjson`
+- 在 `src/app/run-lifecycle.ts` 中为 run 初始化补齐这些字段的默认态，避免 v2 任务 2 之后出现“旧 run 无法序列化到新 schema”的问题。
+- 在 `src/workflow/state-machine.ts` 中把这些 v2 运行态字段接入 rollback reset：
+  - 回退到 `Context Resolution` 会清空 `active_bug_issue_key`
+  - 回退到 `Artifact Linking` 会清空 subtask / branch / commit 绑定 ref
+- 在测试侧补齐任务 2 的红绿覆盖：
+  - `tests/unit/domain/contracts.spec.ts` 锁定新增上下文字段、artifact ref 约定、v2 Jira ledger operation 与 carrier 边界
+  - `tests/unit/storage/persistence-foundation.spec.ts` 锁定 `context.json` allowlist 已纳入上述新增字段
+  - `tests/unit/app/run-lifecycle.spec.ts`、`tests/unit/workflow/state-machine.spec.ts`、`tests/unit/execution/execution.spec.ts`、`tests/unit/jira-writeback/jira-writeback.spec.ts`、`tests/unit/feishu-writeback/feishu-writeback.spec.ts`、`tests/unit/report/report-writer.spec.ts` 同步到新 `ExecutionContext` 契约
+
+### 依据
+
+- 用户指令：继续执行 `memory-bank/features/v2/实施计划.md` 的任务 2；每完成一个步骤先测试，通过后再继续；测试通过后更新 `progress.md` 与 `architecture.md`，在此之前不进入任务 3。
+- `memory-bank/features/v2/实施计划.md` 任务 2：
+  - 为 `ExecutionContext` 增加 `active_bug_issue_key`、`jira_subtask_ref`、`jira_subtask_result_ref`、`git_branch_binding_ref`、`git_commit_binding_refs`
+  - 为 branch 绑定、子任务 preview/result、commit 绑定补齐 artifact ref 约定
+  - 固定 `jira.create_subtask`、`jira.bind_branch`、`jira.bind_commit` 的 side-effect operation 命名与最小账本字段
+  - 明确这些新增字段在 `context.json`、artifact、ledger 之间的承载边界
+- `memory-bank/features/v1/需求文档.md`：
+  - `ExecutionContext` 需支持序列化、恢复执行、失败留场与 CLI 摘要展示
+  - Jira 写回契约要求保留 `idempotency_key`、`target_ref`、`result_id`、`updated_at` 等结构化字段
+- `memory-bank/features/v1/技术方案.md`：
+  - `ExecutionContext` 只保存当前有效态，`context.json` 只允许保存索引、摘要、hash 与 artifact ref
+  - `SideEffectLedgerEntry` 负责幂等、dedupe、payload hash、target/result ref 与执行状态历史
+
+### 验证记录
+
+1. 验证对象：任务 2 步骤 1 的新增 `ExecutionContext` 字段与初始化默认态
+   触发方式：先修改 `tests/unit/domain/contracts.spec.ts` 与 `tests/unit/app/run-lifecycle.spec.ts`，再运行 `npm run test:unit -- tests/unit/domain/contracts.spec.ts` 和 `npm run test:unit -- tests/unit/app/run-lifecycle.spec.ts`
+   预期结果：实现前暴露新增字段缺口；实现后 `ExecutionContext` 与 run 初始化都包含这些字段
+   实际结果：通过；相关单元测试回到 69/69 通过
+
+2. 验证对象：任务 2 步骤 2 的 subtask / branch / commit artifact ref 约定
+   触发方式：先在 `tests/unit/domain/contracts.spec.ts` 增加合法/非法 ref 断言，再运行 `npm run test:unit -- tests/unit/domain/contracts.spec.ts`
+   预期结果：preview/result、branch/commit ref 不能串位，非法前缀必须被 schema 拒绝
+   实际结果：通过；domain contracts 新增 ref 约束后，单测 70/70 通过
+
+3. 验证对象：任务 2 步骤 3 的 v2 Jira side-effect operation 与 ledger 契约
+   触发方式：先在 `tests/unit/domain/contracts.spec.ts` 增加 `JIRA_V2_SIDE_EFFECT_OPERATIONS` 与 `JiraV2SideEffectLedgerEntrySchema` 断言，再运行 `npm run test:unit -- tests/unit/domain/contracts.spec.ts`
+   预期结果：只接受 `jira.create_subtask`、`jira.bind_branch`、`jira.bind_commit`；`result_ref` 需与 operation 对应
+   实际结果：通过；domain contracts 新增 ledger 契约后，单测 71/71 通过
+
+4. 验证对象：任务 2 步骤 4 的 `context.json / artifacts / side-effects.ndjson` 承载边界
+   触发方式：先在 `tests/unit/domain/contracts.spec.ts` 与 `tests/unit/storage/persistence-foundation.spec.ts` 增加 `EXECUTION_CONTEXT_STORAGE_PROJECTION`、`EXECUTION_CONTEXT_ALLOWLIST` 和 `V2_RUNTIME_FIELD_CARRIERS` 断言，再运行 `npm run test:unit -- tests/unit/domain/contracts.spec.ts` 和 `npm run test:unit -- tests/unit/storage/persistence-foundation.spec.ts`
+   预期结果：`context.json` 只新增 key/ref 字段；payload 正文不进入 allowlist；carrier 说明与 artifact/ledger 分工一致
+   实际结果：通过；domain/storage 单测保持 71/71 通过
+
+### 当前边界说明
+
+- 尚未开始 `memory-bank/features/v2/实施计划.md` 的任务 3；本轮只冻结运行态字段、ref 约定、v2 Jira ledger operation 和 context/artifact/ledger 边界，不新增 CLI 命令、不接 workflow 入口、不实现 connector preview/execute。
+- `jira_subtask_ref` 当前只固定为 subtask preview artifact ref；真正的 subtask preview draft/result payload、target 解析和 dedupe 细节仍属于任务 4。
+- `git_branch_binding_ref` 与 `git_commit_binding_refs` 当前只固定 artifact ref 语义，不提前决定 branch/commit 绑定命令的交互输入、审批流或 execute 行为，这些仍保留给任务 3/4。
+
 ## 2026-03-19 - v2 任务 1：扩展项目画像与配置检查，支持 Jira 子任务 / branch / commit 绑定规则
 
 ### 本轮完成内容

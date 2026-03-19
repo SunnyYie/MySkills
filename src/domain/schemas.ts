@@ -25,6 +25,39 @@ const NonEmptyStringSchema = z.string().trim().min(1);
 const TimestampSchema = z.iso.datetime({ offset: true });
 const UrlSchema = z.url();
 const JsonValueSchema = z.json();
+const ArtifactRefSuffixSchema = '[A-Za-z0-9._:/-]+';
+const JiraSubtaskPreviewRefSchema = z
+  .string()
+  .trim()
+  .regex(
+    new RegExp(
+      `^artifact://jira/subtasks/preview/${ArtifactRefSuffixSchema}$`,
+    ),
+  );
+const JiraSubtaskResultRefSchema = z
+  .string()
+  .trim()
+  .regex(
+    new RegExp(
+      `^artifact://jira/subtasks/result/${ArtifactRefSuffixSchema}$`,
+    ),
+  );
+const GitBranchBindingArtifactRefSchema = z
+  .string()
+  .trim()
+  .regex(
+    new RegExp(
+      `^artifact://jira/bindings/branch/${ArtifactRefSuffixSchema}$`,
+    ),
+  );
+const GitCommitBindingArtifactRefSchema = z
+  .string()
+  .trim()
+  .regex(
+    new RegExp(
+      `^artifact://jira/bindings/commit/${ArtifactRefSuffixSchema}$`,
+    ),
+  );
 
 const StageSchema = z.enum(BUGFIX_STAGES);
 const StageStatusSchema = z.enum(STAGE_STATUSES);
@@ -44,6 +77,14 @@ const JiraWritebackTargetTypeSchema = z.enum(JIRA_WRITEBACK_TARGET_TYPES);
 const FeishuWriteModeSchema = z.enum(FEISHU_WRITE_MODES);
 const SideEffectStatusSchema = z.enum(SIDE_EFFECT_STATUSES);
 const ErrorCategorySchema = z.enum(ERROR_CATEGORIES);
+export const JIRA_V2_SIDE_EFFECT_OPERATIONS = [
+  'jira.create_subtask',
+  'jira.bind_branch',
+  'jira.bind_commit',
+] as const;
+const JiraV2SideEffectOperationSchema = z.enum(
+  JIRA_V2_SIDE_EFFECT_OPERATIONS,
+);
 
 const buildPartialStageRecordSchema = <T extends z.ZodTypeAny>(valueSchema: T) =>
   z
@@ -422,6 +463,35 @@ export const SideEffectLedgerEntrySchema = z
   })
   .strict();
 
+export const JiraV2SideEffectLedgerEntrySchema = SideEffectLedgerEntrySchema
+  .extend({
+    system: z.literal('jira'),
+    operation: JiraV2SideEffectOperationSchema,
+  })
+  .superRefine((value, ctx) => {
+    if (!value.result_ref) {
+      return;
+    }
+
+    const resultRefSchema =
+      value.operation === 'jira.create_subtask'
+        ? JiraSubtaskResultRefSchema
+        : value.operation === 'jira.bind_branch'
+          ? GitBranchBindingArtifactRefSchema
+          : GitCommitBindingArtifactRefSchema;
+
+    const parsedResultRef = resultRefSchema.safeParse(value.result_ref);
+    if (parsedResultRef.success) {
+      return;
+    }
+
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `result_ref is invalid for ${value.operation}.`,
+      path: ['result_ref'],
+    });
+  });
+
 export const CheckpointRecordSchema = z
   .object({
     checkpoint_id: NonEmptyStringSchema,
@@ -524,6 +594,7 @@ export const ExecutionContextSchema = z
     initiator: NonEmptyStringSchema,
     started_at: TimestampSchema,
     updated_at: TimestampSchema,
+    active_bug_issue_key: NonEmptyStringSchema.nullable(),
     jira_issue_snapshot_ref: NonEmptyStringSchema,
     requirement_refs: z.array(RequirementReferenceSchema),
     repo_selection: RepoSelectionSchema.nullable().optional(),
@@ -533,6 +604,10 @@ export const ExecutionContextSchema = z
     verification_plan: z.array(NonEmptyStringSchema),
     verification_results_ref: NonEmptyStringSchema.nullable(),
     gitlab_artifacts: z.array(GitLabArtifactSchema),
+    jira_subtask_ref: JiraSubtaskPreviewRefSchema.nullable(),
+    jira_subtask_result_ref: JiraSubtaskResultRefSchema.nullable(),
+    git_branch_binding_ref: GitBranchBindingArtifactRefSchema.nullable(),
+    git_commit_binding_refs: z.array(GitCommitBindingArtifactRefSchema),
     jira_writeback_draft_ref: NonEmptyStringSchema.nullable(),
     jira_writeback_result_ref: NonEmptyStringSchema.nullable(),
     feishu_record_draft_ref: NonEmptyStringSchema.nullable(),
@@ -633,6 +708,9 @@ export type RequirementBrief = z.infer<typeof RequirementBriefSchema>;
 export type BugfixReport = z.infer<typeof BugfixReportSchema>;
 export type ApprovalRecord = z.infer<typeof ApprovalRecordSchema>;
 export type SideEffectLedgerEntry = z.infer<typeof SideEffectLedgerEntrySchema>;
+export type JiraV2SideEffectLedgerEntry = z.infer<
+  typeof JiraV2SideEffectLedgerEntrySchema
+>;
 export type CheckpointRecord = z.infer<typeof CheckpointRecordSchema>;
 export type StructuredError = z.infer<typeof StructuredErrorSchema>;
 export type JiraIssueSnapshot = z.infer<typeof JiraIssueSnapshotSchema>;

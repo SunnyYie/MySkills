@@ -10,6 +10,7 @@ import {
   ERROR_CATEGORIES,
   ERROR_CATEGORY_POLICIES,
   EXECUTION_CONTEXT_STORAGE_PROJECTION,
+  V2_RUNTIME_FIELD_CARRIERS,
   ExecutionContextSchema,
   FeishuRecordDraftSchema,
   FeishuRecordResultSchema,
@@ -18,6 +19,8 @@ import {
   GitLabArtifactSchema,
   JiraWritebackDraftSchema,
   JiraWritebackResultSchema,
+  JIRA_V2_SIDE_EFFECT_OPERATIONS,
+  JiraV2SideEffectLedgerEntrySchema,
   ProjectProfileSchema,
   RequirementBriefSchema,
   RUN_LIFECYCLE_STATUSES,
@@ -365,6 +368,7 @@ describe('domain contracts', () => {
       initiator: 'sunyi',
       started_at: '2026-03-19T10:30:00.000Z',
       updated_at: '2026-03-19T10:35:00.000Z',
+      active_bug_issue_key: 'BUG-123',
       jira_issue_snapshot_ref: 'artifact://jira/issue-snapshot',
       requirement_refs: [
         {
@@ -384,6 +388,10 @@ describe('domain contracts', () => {
       verification_plan: ['Run export regression on failing tenant'],
       verification_results_ref: null,
       gitlab_artifacts: [],
+      jira_subtask_ref: null,
+      jira_subtask_result_ref: null,
+      git_branch_binding_ref: null,
+      git_commit_binding_refs: [],
       jira_writeback_draft_ref: null,
       jira_writeback_result_ref: null,
       feishu_record_draft_ref: null,
@@ -393,6 +401,8 @@ describe('domain contracts', () => {
     };
 
     expect(ExecutionContextSchema.safeParse(baseContext).success).toBe(true);
+    expect(baseContext.active_bug_issue_key).toBe('BUG-123');
+    expect(baseContext.git_commit_binding_refs).toEqual([]);
     expect(
       ExecutionContextSchema.safeParse({
         ...baseContext,
@@ -403,10 +413,135 @@ describe('domain contracts', () => {
     ).toBe(false);
 
     expect(EXECUTION_CONTEXT_STORAGE_PROJECTION.context).toContain('run_id');
+    expect(EXECUTION_CONTEXT_STORAGE_PROJECTION.context).toContain(
+      'active_bug_issue_key',
+    );
+    expect(EXECUTION_CONTEXT_STORAGE_PROJECTION.context).toContain(
+      'jira_subtask_ref',
+    );
+    expect(EXECUTION_CONTEXT_STORAGE_PROJECTION.context).toContain(
+      'jira_subtask_result_ref',
+    );
+    expect(EXECUTION_CONTEXT_STORAGE_PROJECTION.context).toContain(
+      'git_branch_binding_ref',
+    );
+    expect(EXECUTION_CONTEXT_STORAGE_PROJECTION.context).toContain(
+      'git_commit_binding_refs',
+    );
     expect(EXECUTION_CONTEXT_STORAGE_PROJECTION.sideEffects).toContain('side-effects.ndjson');
     expect(EXECUTION_CONTEXT_STORAGE_PROJECTION.checkpoints).toContain('checkpoints/');
     expect(EXECUTION_CONTEXT_STORAGE_PROJECTION.artifacts).toContain('artifacts/');
     expect(EXECUTION_CONTEXT_STORAGE_PROJECTION.errors).toContain('artifacts/errors/');
+    expect(V2_RUNTIME_FIELD_CARRIERS.active_bug_issue_key).toEqual({
+      context: 'context.json',
+      payload: 'bug_issue_key_only',
+    });
+    expect(V2_RUNTIME_FIELD_CARRIERS.jira_subtask_ref).toEqual({
+      context: 'context.json',
+      artifact: 'artifact://jira/subtasks/preview/<id>',
+      payload: 'artifact_ref_only',
+    });
+    expect(V2_RUNTIME_FIELD_CARRIERS.jira_subtask_result_ref).toEqual({
+      context: 'context.json',
+      artifact: 'artifact://jira/subtasks/result/<id>',
+      payload: 'artifact_ref_only',
+    });
+    expect(V2_RUNTIME_FIELD_CARRIERS.git_branch_binding_ref).toEqual({
+      context: 'context.json',
+      artifact: 'artifact://jira/bindings/branch/<id>',
+      payload: 'artifact_ref_only',
+    });
+    expect(V2_RUNTIME_FIELD_CARRIERS.git_commit_binding_refs).toEqual({
+      context: 'context.json',
+      artifact: 'artifact://jira/bindings/commit/<id>',
+      payload: 'artifact_ref_list_only',
+    });
+    expect(V2_RUNTIME_FIELD_CARRIERS.artifactBodies).toEqual({
+      artifact: 'artifacts/',
+      payload: 'preview_payloads_execute_results_human_readable_summaries',
+    });
+    expect(V2_RUNTIME_FIELD_CARRIERS.ledgerEntries).toEqual({
+      ledger: 'side-effects.ndjson',
+      payload:
+        'idempotency_key_dedupe_scope_request_payload_hash_target_ref_expected_target_version_result_ref_status_attempt_no_already_applied_external_request_id_executed_at',
+    });
+  });
+
+  it('enforces v2 artifact ref conventions for Jira subtask and Git binding refs', () => {
+    const baseContext = {
+      run_id: 'run-2',
+      project_id: 'proj-a',
+      config_version: '2026-03-19',
+      run_mode: 'full',
+      run_lifecycle_status: 'active',
+      run_outcome_status: 'in_progress',
+      current_stage: 'Artifact Linking',
+      stage_status_map: {
+        Intake: 'completed',
+        'Context Resolution': 'completed',
+        'Requirement Synthesis': 'completed',
+        'Code Localization': 'completed',
+        'Fix Planning': 'completed',
+        Execution: 'completed',
+        'Artifact Linking': 'in_progress',
+        'Knowledge Recording': 'not_started',
+      },
+      stage_artifact_refs: {},
+      active_approval_ref_map: {},
+      waiting_reason: null,
+      initiator: 'sunyi',
+      started_at: '2026-03-19T10:30:00.000Z',
+      updated_at: '2026-03-19T10:35:00.000Z',
+      active_bug_issue_key: 'BUG-456',
+      jira_issue_snapshot_ref: 'artifact://jira/issue-snapshot',
+      requirement_refs: [],
+      repo_selection: null,
+      code_targets: [],
+      root_cause_hypotheses: [],
+      fix_plan: [],
+      verification_plan: [],
+      verification_results_ref: null,
+      gitlab_artifacts: [],
+      jira_subtask_ref: 'artifact://jira/subtasks/preview/BUG-456',
+      jira_subtask_result_ref: 'artifact://jira/subtasks/result/BUG-456',
+      git_branch_binding_ref: 'artifact://jira/bindings/branch/BUG-456',
+      git_commit_binding_refs: [
+        'artifact://jira/bindings/commit/BUG-456-1',
+        'artifact://jira/bindings/commit/BUG-456-2',
+      ],
+      jira_writeback_draft_ref: null,
+      jira_writeback_result_ref: null,
+      feishu_record_draft_ref: null,
+      feishu_record_result_ref: null,
+      active_error_ref: null,
+      sensitive_field_paths: [],
+    };
+
+    expect(ExecutionContextSchema.safeParse(baseContext).success).toBe(true);
+    expect(
+      ExecutionContextSchema.safeParse({
+        ...baseContext,
+        jira_subtask_ref: 'artifact://jira/subtasks/result/BUG-456',
+      }).success,
+    ).toBe(false);
+    expect(
+      ExecutionContextSchema.safeParse({
+        ...baseContext,
+        jira_subtask_result_ref: 'artifact://jira/subtasks/preview/BUG-456',
+      }).success,
+    ).toBe(false);
+    expect(
+      ExecutionContextSchema.safeParse({
+        ...baseContext,
+        git_branch_binding_ref: 'artifact://jira/bindings/commit/BUG-456',
+      }).success,
+    ).toBe(false);
+    expect(
+      ExecutionContextSchema.safeParse({
+        ...baseContext,
+        git_commit_binding_refs: ['artifact://jira/bindings/branch/BUG-456'],
+      }).success,
+    ).toBe(false);
   });
 
   it('defines the remaining core schemas expected by later workflow and storage tasks', () => {
@@ -479,6 +614,86 @@ describe('domain contracts', () => {
         context_hash: 'sha256:context',
       }).success,
     ).toBe(true);
+  });
+
+  it('freezes the v2 Jira side-effect operation names and minimal ledger entry contract', () => {
+    expect(JIRA_V2_SIDE_EFFECT_OPERATIONS).toEqual([
+      'jira.create_subtask',
+      'jira.bind_branch',
+      'jira.bind_commit',
+    ]);
+
+    expect(
+      JiraV2SideEffectLedgerEntrySchema.safeParse({
+        system: 'jira',
+        operation: 'jira.create_subtask',
+        idempotency_key: 'jira:create_subtask:BUG-456',
+        dedupe_scope: 'jira:BUG-456:subtask',
+        request_payload_hash: 'sha256:payload',
+        target_ref: 'jira://BUG-456/subtasks',
+        expected_target_version: null,
+        result_ref: null,
+        status: 'prepared',
+        attempt_no: 1,
+        already_applied: false,
+        external_request_id: null,
+        executed_at: '2026-03-19T10:30:00.000Z',
+      }).success,
+    ).toBe(true);
+
+    expect(
+      JiraV2SideEffectLedgerEntrySchema.safeParse({
+        system: 'jira',
+        operation: 'jira.bind_branch',
+        idempotency_key: 'jira:bind_branch:BUG-456:bugfix/BUG-456',
+        dedupe_scope: 'jira:BUG-456:branch:bugfix/BUG-456',
+        request_payload_hash: 'sha256:payload',
+        target_ref: 'jira://BUG-456/development/branch',
+        expected_target_version: null,
+        result_ref: 'artifact://jira/bindings/branch/BUG-456',
+        status: 'succeeded',
+        attempt_no: 1,
+        already_applied: false,
+        external_request_id: 'req-1',
+        executed_at: '2026-03-19T10:31:00.000Z',
+      }).success,
+    ).toBe(true);
+
+    expect(
+      JiraV2SideEffectLedgerEntrySchema.safeParse({
+        system: 'jira',
+        operation: 'bind_branch',
+        idempotency_key: 'jira:bind_branch:BUG-456:bugfix/BUG-456',
+        dedupe_scope: 'jira:BUG-456:branch:bugfix/BUG-456',
+        request_payload_hash: 'sha256:payload',
+        target_ref: 'jira://BUG-456/development/branch',
+        expected_target_version: null,
+        result_ref: 'artifact://jira/bindings/branch/BUG-456',
+        status: 'succeeded',
+        attempt_no: 1,
+        already_applied: false,
+        external_request_id: 'req-1',
+        executed_at: '2026-03-19T10:31:00.000Z',
+      }).success,
+    ).toBe(false);
+
+    expect(
+      JiraV2SideEffectLedgerEntrySchema.safeParse({
+        system: 'jira',
+        operation: 'jira.bind_commit',
+        idempotency_key: 'jira:bind_commit:BUG-456:abc123',
+        dedupe_scope: 'jira:BUG-456:commit:abc123',
+        request_payload_hash: 'sha256:payload',
+        target_ref: 'jira://BUG-456/development/commit',
+        expected_target_version: null,
+        result_ref: 'artifact://jira/bindings/branch/BUG-456',
+        status: 'succeeded',
+        attempt_no: 1,
+        already_applied: false,
+        external_request_id: 'req-2',
+        executed_at: '2026-03-19T10:32:00.000Z',
+      }).success,
+    ).toBe(false);
   });
 
   it('defines a reviewable fix planning contract with execution handoff fields', () => {

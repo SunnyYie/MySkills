@@ -82,7 +82,12 @@ describe('app run lifecycle', () => {
     expect(context).toMatchObject({
       run_id: 'run-seeded',
       project_id: 'proj-a',
+      active_bug_issue_key: null,
       jira_issue_snapshot_ref: 'artifact://jira/BUG-123',
+      jira_subtask_ref: null,
+      jira_subtask_result_ref: null,
+      git_branch_binding_ref: null,
+      git_commit_binding_refs: [],
       run_lifecycle_status: 'active',
       run_outcome_status: 'in_progress',
     });

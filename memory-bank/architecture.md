@@ -464,3 +464,57 @@
 - unresolved requirement 没有在任务 8 被当成失败直接拒绝，而是生成可继续流转的 brief，并把风险留在显式 warning 与 pending question 中。这与需求文档里“允许继续生成 brief，但必须保留 `binding_reason`”的策略一致，也避免把“需要人工补录”与“系统硬失败”混成一类。
 - `source_refs` 当前先作为逻辑引用面固定下来，而没有马上写成真实 artifact record，是一种刻意分层：任务 8 先证明 brief 本身可被引用，后续 workflow / storage 再决定它何时落盘、如何绑定审批和 checkpoint。
 - `fix_goal` 与 `known_context` 采用稳定模板式生成，而不是自由摘要，是为了把这个阶段维持在“结构化归纳”而非“开放式写作”。这能减少文案漂移，也让后续测试更容易锁定行为。
+
+## 任务 9 当前 Code Localization 层
+
+任务 9 完成后，仓库第一次拥有了“从已确认 brief 继续收敛到代码候选”的最小只读链路。这个阶段仍然只负责搜索和表达，不承担 fix plan 生成、artifact 真实落盘或 workflow 接线。
+
+## 新增文件职责
+
+### `src/domain/schemas.ts`
+
+- 在既有 `RequirementSynthesisStageResultSchema` 之后，新增 `CodeLocalizationDataSchema` 与 `CodeLocalizationStageResultSchema`。
+- 把任务 9 的输出面固定为三块：`impact_modules`、`code_targets`、`root_cause_hypotheses`。
+- 继续复用统一 `StageResult<T>`，让 `Code Localization` 和前面阶段一样具备一致的 `status / summary / warnings / errors / source_refs / generated_at` 结构，而不是在 skill 里临时拼特例对象。
+
+### `src/infrastructure/repo/workspace.ts`
+
+- 继续承接 Repo Workspace Adapter 的只读职责，并在任务 9 中补上“代码搜索”这一块，而不是把文件系统遍历写进 skill。
+- `extractSearchRoot()` 把 `repo.module_rules` 的 `path_pattern` 收敛为实际搜索根目录，先把“模块规则怎么映射到磁盘目录”固定下来。
+- `searchRepoWorkspace()` 负责递归读取候选目录、把命中文件归一化为相对仓库路径、按 issue / brief 词项命中数排序，并保留 `module_id` 与匹配原因，供上层 skill 决定是完成、等待还是提示人工收敛。
+- 该文件仍然保持只读，不写 run 状态、不做 checkpoint，也不生成修复建议，符合技术方案里“Repo Workspace Adapter 只提供读能力”的边界。
+
+### `src/infrastructure/repo/index.ts`
+
+- 继续作为 repo 基础设施的公共出口。
+- 因为 `searchRepoWorkspace()` 也落在 `workspace.ts` 内，这个公共出口可以让上层 skill 继续只依赖 repo 模块公共面，而不是深引用内部实现文件。
+
+### `src/skills/code-locator/index.ts`
+
+- 提供任务 9 的核心 skill `locateCodeTargets()`。
+- 只消费 `ProjectProfile`、`JiraIssueSnapshot`、`ProjectContextData`、`RequirementBrief` 四类已结构化输入，延续“skill 不直接做 I/O”的设计。
+- 负责把 repo 搜索结果折叠成三类稳定输出：
+  - 唯一命中时 `completed`
+  - 无结果时 `waiting` + `manual_code_localization`
+  - 多候选时 `waiting` + `manual_code_target_selection`
+- 同时负责把影响模块和根因假设保持在可被后续 `fix-planner` 直接消费的最小表达，而不是把搜索细节原样泄漏到下游。
+
+### `src/skills/index.ts`
+
+- 继续承担 skills 统一出口职责，并新增 `code-locator` 导出。
+- 这能保证后续 workflow 或 CLI 接入任务 9 时，仍通过统一技能入口装配，而不是开始出现“有些 skill 走公共出口，有些 skill 走深路径”的分裂。
+
+### `tests/unit/code-locator/code-locator.spec.ts`
+
+- 任务 9 的 Code Localization 单元测试。
+- 锁定三类最小场景：唯一命中、无结果、多候选。
+- 同时验证三件容易漂移的细节：路径必须归一化为相对仓库路径、影响模块必须显式输出、根因假设必须稳定存在于定位结果里。
+- 这组测试也保住了“等待人工判断”和“真正失败”之间的语义边界，避免后续把无结果误做成已定位成功，或者把多候选误当成系统错误。
+
+## 任务 9 架构洞察
+
+- 任务 9 最重要的分层收敛，是把“读仓库和找文件”继续留在 infrastructure，把“如何解释这些候选并形成阶段结果”留在 skill。这样以后即使搜索策略变复杂，`code-locator` 仍然只关心结构化候选，而不用自己处理磁盘遍历和路径规范化。
+- `Requirement Brief` 在这一阶段真正开始发挥“下游稳定输入”的作用。`code-locator` 读取 brief，而不是重新直接从 Jira 文本临时总结，是为了延续任务 8 建立的中间产物价值，并减少不同阶段各自做摘要导致的漂移。
+- 任务 9 没有把“无结果”和“多候选”都粗暴归类为失败，而是显式进入 `waiting`。这是为了贴合实施计划里“workflow 能区分可继续分析和需人工判断的结果”的要求，也给任务 10 留下清晰边界：只有当代码定位足够收敛时，修复计划才应该继续自动生成。
+- `impact_modules` 没有被直接塞回 `ExecutionContext` 新字段，而是先作为 `CodeLocalizationData` 输出面固定。这是有意控制范围：技术方案已经要求运行态至少保留 `repo_selection`、`code_targets`、`root_cause_hypotheses`，因此本轮把“影响模块”维持为阶段产物，避免在任务 9 提前扩张运行态。
+- 搜索策略目前刻意保持为“模块规则缩窄目录 + 稳定词项命中排序”的最小实现，没有提前引入 AST、语义索引或 Git 历史。这让任务 9 先解决“结构和边界”的问题，而把更重的定位智能留给后续明确授权的迭代。

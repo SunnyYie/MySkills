@@ -1,16 +1,43 @@
 import path from 'node:path';
-import { access } from 'node:fs/promises';
+import { access, readFile, readdir } from 'node:fs/promises';
 
 import {
+  CodeTargetSchema,
   RepoSelectionSchema,
   StructuredErrorSchema,
   type JiraIssueSnapshot,
+  type RequirementBrief,
   type ProjectProfile,
   type RepoSelection,
   type StructuredError,
 } from '../../domain/index.js';
 
 const normalizeText = (value: string) => value.trim().toLowerCase();
+const normalizeRelativePath = (value: string) => value.split(path.sep).join('/');
+const STOP_WORDS = new Set([
+  'the',
+  'and',
+  'when',
+  'with',
+  'from',
+  'into',
+  'that',
+  'this',
+  'flow',
+  'fails',
+  'rejects',
+  'module',
+  'submit',
+  'time',
+]);
+
+const extractSearchRoot = (rule: ProjectProfile['repo']['module_rules'][number]) => {
+  const normalizedPattern = rule.path_pattern.replace(/\\/g, '/');
+  const globIndex = normalizedPattern.search(/[\*\{\[]/);
+  const prefix =
+    globIndex === -1 ? normalizedPattern : normalizedPattern.slice(0, globIndex);
+  return prefix.replace(/\/+$/, '') || '.';
+};
 
 const collectModuleCandidates = ({
   issueSnapshot,
@@ -45,6 +72,170 @@ const collectModuleCandidates = ({
   return projectProfile.repo.module_rules
     .map((rule) => rule.module_id.trim())
     .filter((moduleId) => signalText.includes(normalizeText(moduleId)));
+};
+
+const tokenizeSearchTerms = ({
+  issueSnapshot,
+  requirementBrief,
+  moduleCandidates,
+}: {
+  issueSnapshot: JiraIssueSnapshot;
+  requirementBrief: RequirementBrief;
+  moduleCandidates: string[];
+}) => {
+  const excludedTokens = new Set(moduleCandidates.map((value) => normalizeText(value)));
+  const corpus = [
+    issueSnapshot.summary,
+    issueSnapshot.description,
+    requirementBrief.fix_goal,
+  ].join(' ');
+
+  const rankedTokens = corpus
+    .toLowerCase()
+    .split(/[^a-z0-9]+/i)
+    .map((token) => token.trim())
+    .filter(
+      (token) =>
+        token.length >= 4 &&
+        !STOP_WORDS.has(token) &&
+        !excludedTokens.has(token),
+    );
+
+  return [...new Set(rankedTokens)].slice(0, 12);
+};
+
+const listFilesRecursively = async (directoryPath: string): Promise<string[]> => {
+  const entries = await readdir(directoryPath, { withFileTypes: true });
+  const files: string[] = [];
+
+  for (const entry of entries) {
+    const entryPath = path.join(directoryPath, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...(await listFilesRecursively(entryPath)));
+      continue;
+    }
+
+    if (entry.isFile()) {
+      files.push(entryPath);
+    }
+  }
+
+  return files;
+};
+
+const collectSearchRoots = ({
+  projectProfile,
+  repoSelection,
+}: {
+  projectProfile: ProjectProfile;
+  repoSelection: RepoSelection;
+}) => {
+  const allowedModules =
+    repoSelection.module_candidates.length > 0
+      ? new Set(repoSelection.module_candidates.map((value) => value.trim()))
+      : null;
+
+  const rules = projectProfile.repo.module_rules.filter((rule) =>
+    allowedModules ? allowedModules.has(rule.module_id.trim()) : true,
+  );
+
+  return rules.map((rule) => ({
+    moduleId: rule.module_id.trim(),
+    absoluteRoot: path.join(repoSelection.repo_path, extractSearchRoot(rule)),
+  }));
+};
+
+const scoreCandidate = ({
+  relativePath,
+  contents,
+  searchTerms,
+}: {
+  relativePath: string;
+  contents: string;
+  searchTerms: string[];
+}) => {
+  const haystack = `${relativePath} ${contents}`.toLowerCase();
+  const matchedTerms = searchTerms.filter((term) => haystack.includes(term));
+
+  return {
+    matchedTerms,
+    score: matchedTerms.length,
+  };
+};
+
+export const searchRepoWorkspace = async ({
+  projectProfile,
+  repoSelection,
+  issueSnapshot,
+  requirementBrief,
+}: {
+  projectProfile: ProjectProfile;
+  repoSelection: RepoSelection;
+  issueSnapshot: JiraIssueSnapshot;
+  requirementBrief: RequirementBrief;
+}) => {
+  const searchTerms = tokenizeSearchTerms({
+    issueSnapshot,
+    requirementBrief,
+    moduleCandidates: repoSelection.module_candidates,
+  });
+  const searchRoots = collectSearchRoots({
+    projectProfile,
+    repoSelection,
+  });
+  const candidates: Array<{
+    file_path: string;
+    reason: string;
+    score: number;
+    module_id: string;
+    matched_terms: string[];
+  }> = [];
+
+  for (const searchRoot of searchRoots) {
+    try {
+      await access(searchRoot.absoluteRoot);
+    } catch {
+      continue;
+    }
+
+    const files = await listFilesRecursively(searchRoot.absoluteRoot);
+    for (const absolutePath of files) {
+      const relativePath = normalizeRelativePath(
+        path.relative(repoSelection.repo_path, absolutePath),
+      );
+
+      let contents = '';
+      try {
+        contents = await readFile(absolutePath, 'utf8');
+      } catch {
+        continue;
+      }
+
+      const scored = scoreCandidate({
+        relativePath,
+        contents,
+        searchTerms,
+      });
+
+      if (scored.score === 0) {
+        continue;
+      }
+
+      candidates.push({
+        file_path: CodeTargetSchema.shape.file_path.parse(relativePath),
+        reason: `Matched ${scored.matchedTerms.join(', ')} in module ${searchRoot.moduleId}.`,
+        score: scored.score,
+        module_id: searchRoot.moduleId,
+        matched_terms: scored.matchedTerms,
+      });
+    }
+  }
+
+  return candidates.sort(
+    (left, right) =>
+      right.score - left.score ||
+      left.file_path.localeCompare(right.file_path),
+  );
 };
 
 export const createRepoResolutionError = ({

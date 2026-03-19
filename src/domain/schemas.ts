@@ -425,6 +425,14 @@ export const ProjectContextDataSchema = z
   })
   .strict();
 
+export const CodeLocalizationDataSchema = z
+  .object({
+    impact_modules: z.array(NonEmptyStringSchema),
+    code_targets: z.array(CodeTargetSchema),
+    root_cause_hypotheses: z.array(NonEmptyStringSchema),
+  })
+  .strict();
+
 export const ExecutionContextSchema = z
   .object({
     run_id: NonEmptyStringSchema,
@@ -536,6 +544,9 @@ export const ProjectContextStageResultSchema = createStageResultSchema(
 export const RequirementSynthesisStageResultSchema = createStageResultSchema(
   RequirementBriefSchema,
 );
+export const CodeLocalizationStageResultSchema = createStageResultSchema(
+  CodeLocalizationDataSchema,
+);
 
 export type ProjectProfile = z.infer<typeof ProjectProfileSchema>;
 export type ExecutionContext = z.infer<typeof ExecutionContextSchema>;
@@ -551,6 +562,7 @@ export type JiraIssueWritebackTarget = z.infer<typeof JiraIssueWritebackTargetSc
 export type RequirementCandidate = z.infer<typeof RequirementCandidateSchema>;
 export type JiraIntakeData = z.infer<typeof JiraIntakeDataSchema>;
 export type ProjectContextData = z.infer<typeof ProjectContextDataSchema>;
+export type CodeLocalizationData = z.infer<typeof CodeLocalizationDataSchema>;
 export type RepoSelection = z.infer<typeof RepoSelectionSchema>;
 export type StageResultStatus = z.infer<typeof StageResultStatusSchema>;
 export type StageResult<T> = {
@@ -569,4 +581,7 @@ export type ProjectContextStageResult = z.infer<
 >;
 export type RequirementSynthesisStageResult = z.infer<
   typeof RequirementSynthesisStageResultSchema
+>;
+export type CodeLocalizationStageResult = z.infer<
+  typeof CodeLocalizationStageResultSchema
 >;

@@ -764,3 +764,57 @@
 - 尚未开始任务 15；当前只补齐统一 `Bugfix Report` 组装与导出能力，不进入 CLI 命令树扩展、`run` / `record` 子工作流注册或真实命令接线。
 - 当前 `report-writer` 继续建立在“最终上下文 + 摘要 + ref”的事实源之上：不会回退到直接嵌入 Jira/Feishu 原始 payload、完整 checkpoint 历史或错误长正文，保持与需求文档、技术方案一致的 redaction / storage 边界。
 - 当前导出层只提供纯 renderer，不承担状态查询、文件落盘或命令交互；真正把报告挂接到 CLI 命令面仍属于任务 15 的范围。
+
+## 2026-03-19 - 任务 15：实现 CLI 命令面与子工作流
+
+### 本轮完成内容
+
+- 新增 `src/cli/run/register.ts` 与 `src/cli/record/register.ts`，把实施计划要求的四组命令树补齐到 CLI：在既有 `bind`、`inspect` 基础上，新增 `run` 和 `record` 两组命令，并注册 `run start`、`run brief`、`run resume`、`run status`、`run approve`、`run revise`、`run reject`、`run provide-artifact`、`run provide-verification`、`run preview-write`、`run execute-write` 以及 `record jira`、`record feishu` 的稳定入口。
+- 新增 `src/app/cli-orchestration.ts`，在 app 层集中承接任务 15 需要的 CLI 编排接缝：把主流程启动、`brief_only` / `jira_writeback_only` / `feishu_record_only` 三类子工作流 run 初始化、共享状态查看、恢复入口、审批/回退动作、Execution 补录入口以及 write preview / execute 的最小持久化语义统一收敛到 app 层，而不是让 CLI 直接拼业务状态。
+- 新增 `src/cli/shared.ts`，统一 `TTY/JSON` 输出与 `--output <path>` 落点；所有新命令都共享同一份输出路径，避免 `run` 与 `record` 各自定义不同的 JSON 结构或文件写法。
+- 更新 `src/cli/program.ts` 与 `src/app/index.ts`，把新命令注册层和 app 公共导出接入现有 CLI 启动链路，保持 `bootstrapCli()` 仍是唯一 CLI 装配入口。
+- 新增 `tests/integration/cli/run-record-commands.spec.ts`，先用红绿测试锁定任务 15 的最小 CLI 契约：命令树完整性、`run brief` 与 `record jira` 的唯一入口归属、子工作流 run mode 与 stage/status 初始化，以及 `run status` / `run resume` 对共享恢复语义的输出稳定性。
+
+### 依据
+
+- 用户指令：阅读所有 `memory-bank` 文档并继续执行实施计划任务 15；在验证通过之前不得开始任务 16；验证通过后更新 `progress.md`，再补充 `architecture.md` 解释文件职责；worktree 代码测试通过后合并到 `main`。
+- `memory-bank/实施计划.md` 任务 15：要求通过统一 CLI 提供主流程、审批、补录、dry-run、子工作流和状态查看入口，并固定 `bind`、`inspect`、`run`、`record` 四组命令的职责边界。
+- `memory-bank/需求文档.md`：
+  - “CLI 需求”：CLI 至少分为 `bind`、`inspect`、`run`、`record` 四类，且必须支持 JSON 输出、dry-run、明确错误码、阶段结果序列化保存与恢复执行。
+  - “子工作流要求”：必须支持“仅生成 Requirement Brief”“仅回写 Jira”“仅写入飞书记录”，并且子工作流不得绕过必要审批，必须复用与主流程一致的状态机和错误语义。
+- `memory-bank/技术方案.md`：
+  - “9.2 子工作流”：不适用阶段要标记为 `skipped`，子工作流具备独立最小输入校验，并复用统一状态机。
+  - “13. CLI 设计”：固定 `run` / `record` 命令分组、命令列表、`--json` / `--dry-run` / `--non-interactive` / `--output` / `--checkpoint` 全局参数语义，以及 `record` 只是创建最小 run 的快捷入口，不是绕过 workflow 的后门。
+
+### 验证记录
+
+1. 验证对象：任务 15 CLI 红灯起点
+   触发方式：先运行 `npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts`
+   预期结果：实现前因缺少 `run` / `record` 命令注册与最小 run 接线而失败，而不是误绿
+   实际结果：通过；首轮失败准确暴露顶层帮助里缺少 `run`、`record` 命令组，且 `run brief` / `record jira` 调用会落到 unknown command，证明新增测试确实先锁定了任务 15 的缺口
+
+2. 验证对象：任务 15 CLI 集成红绿闭环
+   触发方式：补实现后再次运行 `npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts`
+   预期结果：命令树、子工作流入口归属、run mode 初始化、状态查看与恢复输出全部通过
+   实际结果：通过；`tests/integration/cli/run-record-commands.spec.ts` 3 项断言全部通过
+
+3. 验证对象：根级测试聚合入口
+   触发方式：运行 `npm test`
+   预期结果：任务 15 新增 integration 测试通过，任务 1-14 的既有 unit / integration / acceptance 回归继续通过
+   实际结果：通过；unit 共 66/66 通过，integration 共 5/5 通过（含新增 `run-record-commands` 3 项断言），acceptance `task1-project-skeleton` 4/4 通过
+
+4. 验证对象：TypeScript 类型检查
+   触发方式：运行 `npm run typecheck`
+   预期结果：新增 app/cli 模块与命令注册入口可通过类型检查
+   实际结果：通过；首次验证暴露 `revise` / `provide-artifact` / `provide-verification` 复用了带必填 `stage` 的输入类型，修正为可选后重新验证通过，命令退出码为 0
+
+5. 验证对象：构建入口
+   触发方式：运行 `npm run build`
+   预期结果：新增 `src/app/cli-orchestration.ts`、`src/cli/run/register.ts`、`src/cli/record/register.ts`、`src/cli/shared.ts` 可正常编译到 `dist/`
+   实际结果：通过；命令退出码为 0
+
+### 当前边界说明
+
+- 尚未开始任务 16；当前只补齐 CLI 命令树、子工作流 run 初始化和最小共享状态/恢复接线，不扩展到需求验收矩阵、三层回归结构或最终文档一致性巡检。
+- 当前 `run approve/reject/revise/provide-artifact/provide-verification/preview-write/execute-write` 已具备最小持久化入口与稳定输出，但仍属于任务 15 的“CLI 命令面接线”层级：它们复用已有 workflow / storage 语义，不代表已经完成任务 16 的端到端恢复场景覆盖。
+- 当前 write preview / execute 在 CLI 侧只落最小 preview / result artifact 与 checkpoint 更新，用于固定命令边界和状态语义；真实外部 connector 调用、side-effect ledger 全链路持久化与需求验收级场景映射仍由后续端到端验证任务承接。

@@ -2,6 +2,8 @@ import { Command } from 'commander';
 
 import { registerBindCommands } from './bind/register.js';
 import { registerInspectCommands } from './inspect/register.js';
+import { registerRecordCommands } from './record/register.js';
+import { registerRunCommands } from './run/register.js';
 
 type CliIo = {
   writeStdout: (chunk: string) => void;
@@ -47,6 +49,8 @@ export function createProgram(options: CreateProgramOptions = {}) {
 
   registerBindCommands(program, runtime);
   registerInspectCommands(program, runtime);
+  registerRunCommands(program, runtime);
+  registerRecordCommands(program, runtime);
 
   return program;
 }

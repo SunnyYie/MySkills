@@ -798,3 +798,59 @@
 - 报告层没有回退成“直接读取所有中间工件再现场拼装”，而是继续建立在 `ExecutionContext` 当前有效态、审批历史和外部结果摘要之上，这延续了任务 2/3 建立的物理边界纪律：最终输出消费的是 ref 和摘要，不重新打破 redaction / storage 约束。
 - `failure_summary`、`jira_writeback_summary` 和 `feishu_record_summary` 被放进同一个 skill 统一生成，是为了防止 partial_success / failed / cancelled 这些跨阶段语义在不同输出渠道里各自解释。报告层应表达 run 结果，而不是让 CLI 或 Markdown 模板各自“猜一次最终状态”。
 - JSON、CLI、Markdown 三种导出共享同一份 `BugfixReport`，意味着后续无论是 CLI 查看、文件导出还是知识沉淀，都能围绕同一个事实源展开；这会显著降低任务 15 接线时的重复实现和口径漂移风险。
+
+## 任务 15 当前 CLI 命令面与子工作流接线层
+
+任务 15 完成后，仓库第一次把“已有 workflow / storage / report 基础能力”接到了统一 CLI 命令树上。这个阶段的重点不是提前把所有业务都做成端到端自动化，而是先把 `bind`、`inspect`、`run`、`record` 四组命令的 owner 固定下来，并让主流程入口、子工作流入口、状态查看与恢复路径都有稳定的 app 层接缝和持久化语义。
+
+## 新增与变更文件职责
+
+### `src/app/cli-orchestration.ts`
+
+- 这是任务 15 新增的 app 层 CLI 编排文件，也是本轮最核心的新文件。
+- 它负责把 CLI 命令层真正接到已有的 run lifecycle、workflow 纯规则和 storage 持久化语义上：包括 `run start` / `run brief` 的 run 初始化、`record jira` / `record feishu` 的最小子工作流 run 创建、`run status` / `run resume` 的共享状态与恢复视图，以及审批、回退、Execution 补录、preview / execute 的最小命令接线。
+- 文件里最关键的职责不是“实现业务推理”，而是把“命令触发一次要怎么读写当前有效态和 checkpoint”集中到 app 层，避免 CLI 命令处理器直接去拼 `ExecutionContext`、checkpoint 和 artifact 文件。
+- `applyRunModePreset()` 明确把 `brief_only`、`jira_writeback_only`、`feishu_record_only` 三种子工作流映射成统一 `ExecutionContext` 事实：不适用阶段标记为 `skipped`，`record jira` 从 `Execution` 的外部输入等待态起步，保证子工作流仍然走同一套状态机语义，而不是走 CLI 私有捷径。
+- `persistUpdatedContext()` 与 `buildCheckpoint()` 把“命令改变当前有效态后必须同步写 durable checkpoint”这件事固定下来，确保 `run resume` 仍然建立在 checkpoint 而不是临时内存态之上。
+
+### `src/app/index.ts`
+
+- 在既有 bootstrap / project-profile / run-lifecycle / use-case 公共面之外，新增对 `cli-orchestration` 的导出。
+- 继续保持 app 层统一公共入口，让 CLI 与测试都通过 `src/app` 依赖应用装配能力，而不是直接跨文件抓内部细节。
+
+### `src/cli/shared.ts`
+
+- 这是任务 15 新增的 CLI 输出共用文件。
+- `emitCliPayload()` 统一处理 TTY/JSON 输出与 `--output <path>` 文件落点，避免 `run`、`record`、`bind`、`inspect` 之后每组命令各自维护一套“怎么写 stdout、怎么写输出文件”的分叉逻辑。
+- 这个文件的存在让 CLI 层继续只关注“用户要看什么样的结果”，而不是在每个命令里重复拼序列化与文件写入细节。
+
+### `src/cli/run/register.ts`
+
+- 这是任务 15 新增的 `run` 命令注册层。
+- 它把技术方案中列出的主流程命令全部显式注册出来：`start`、`brief`、`resume`、`status`、`approve`、`revise`、`reject`、`provide-artifact`、`provide-verification`、`preview-write`、`execute-write`。
+- 该文件的核心职责是“命令面映射”，不是业务实现：它负责声明参数、统一挂接 `--json` / `--dry-run` / `--non-interactive` / `--output` / `--checkpoint`，然后把动作委托给 app 层的 `cli-orchestration`。
+- 这样可以把“命令长什么样”和“命令如何改变 run”拆开，让后续任务 16 做回归时，可以分别验证命令树契约和应用编排语义。
+
+### `src/cli/record/register.ts`
+
+- 这是任务 15 新增的 `record` 子工作流命令注册层。
+- 它只暴露 `record jira` 和 `record feishu` 两个官方入口，显式避免 `record brief` 这类与技术方案冲突的旁路命名。
+- 文件通过 app 层把 `record` 收敛为“创建最小 run 的快捷入口”，而不是绕过 workflow；后续审批、状态查看、恢复、preview / execute 仍然复用统一 `run` 生命周期。
+
+### `src/cli/program.ts`
+
+- 在既有 `bind`、`inspect` 命令注册基础上，新增 `run` 与 `record` 的注册。
+- 这使 `createProgram()` 再次成为完整 CLI 命令树的唯一装配点，防止命令分组在不同入口被分散初始化。
+
+### `tests/integration/cli/run-record-commands.spec.ts`
+
+- 这是任务 15 新增的 CLI 集成测试。
+- 它锁定三类最小闭环：顶层命令树和子命令可达性、`run brief` 与 `record jira` 的唯一归属及其 run mode / stage 初始化、以及 `run status` / `run resume` 对共享恢复语义的输出稳定性。
+- 这组测试的重点不是把任务 16 的所有验收场景提前做完，而是先保证“命令树存在、入口归属正确、最小状态语义稳定”。
+
+## 任务 15 架构洞察
+
+- 任务 15 最重要的 owner 收敛，是把 CLI 真正分成了“注册层”和“应用编排层”两段：`src/cli/*/register.ts` 只定义命令树与参数面，`src/app/cli-orchestration.ts` 才负责读写 run 和 checkpoint。这样能避免 CLI 再次退化成“直接改 JSON 文件的胖命令处理器”。
+- `record` 被实现成“最小 run 初始化”的快捷入口，而不是直接触发 Jira/Feishu 写回，是这一步最关键的边界保护。这样子工作流依然共享相同的 checkpoint、恢复、审批与 stage status 语义，符合需求文档和技术方案里“不绕过 workflow”的要求。
+- `brief_only` / `jira_writeback_only` / `feishu_record_only` 的 preset 都收敛在 app 层，而没有散落在各个 CLI 命令处理器里。这让“哪些阶段应该 `skipped`、哪些阶段应该从 `waiting_external_input` 起步”成为一处可测的事实，而不是多个命令分支里的隐含约定。
+- 当前 preview / execute 在 CLI 侧只落最小 preview/result artifact 与 checkpoint，同步固定了命令边界，但没有提前越权去实现任务 16 的验收矩阵或真实外部副作用编排。换句话说，任务 15 的价值是先把入口和语义钉住，而不是假装端到端问题已经全部解决。

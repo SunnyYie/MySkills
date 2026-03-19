@@ -201,3 +201,54 @@
 - 尚未开始任务 5；当前只实现 workflow 层的纯状态机、不变式和恢复动作判定，不实现 app 层 run 创建、锁获取、checkpoint 持久化编排或 CLI 到 use case 的装配。
 - 当前 `applyRevisionRollback()` 只负责重置 `ExecutionContext` 当前有效态与活动引用；审批历史、artifact 历史和 checkpoint 写入仍由后续任务 5/后续持久化调用方承接。
 - 当前 `getRecoveryAction()` 只输出“等待 / 对账 / 人工复核 / 继续当前阶段”的策略结论，不直接执行 reconcile、重试或恢复路由。
+
+## 2026-03-19 - 任务 5：实现应用装配层与 run 生命周期控制
+
+### 本轮完成内容
+
+- 在 `src/app/use-cases.ts` 中冻结 CLI 到 application use case 的最小映射边界，先把 `bind`、`inspect`、`run`、`record` 四个命令组统一收敛到 app 层入口，避免 CLI 后续直接触碰 workflow 或 storage 细节。
+- 在 `src/app/run-lifecycle.ts` 中实现任务 5 需要的最小 run 生命周期装配：初始化 `run_id`、初始 `ExecutionContext`、首个 checkpoint、run 级锁获取与释放，以及恢复时的 checkpoint 选择与路由判定。
+- 在 `src/app/run-lifecycle.ts` 中把任务 4 的 `getRecoveryAction()` 接入 app 层恢复入口，覆盖“最近 checkpoint 恢复”“显式 checkpoint 恢复”“`outcome_unknown` / 未终态副作用先 reconcile”的判断路径。
+- 在 `src/app/run-lifecycle.ts` 中固定 `StructuredError` 与 run 锁冲突/恢复缺口的 CLI 失败映射，统一错误类别、下一步建议动作和退出码归属，避免 CLI、workflow、storage 各自解释错误。
+- 新增 `src/app/index.ts` 作为 app 层公共导出入口，并新增 `tests/unit/app/run-lifecycle.spec.ts`，以红绿测试锁定任务 5 的最小契约。
+
+### 依据
+
+- 用户指令：继续执行实施计划任务 5；在测试验证通过前不进入任务 6，验证通过后更新 `progress.md` 与 `architecture.md`，并在 worktree 代码测试通过后合并到 `main`。
+- `memory-bank/实施计划.md` 任务 5：要求 app 层成为 CLI 与 workflow 之间的唯一装配入口，统一处理 run 创建、恢复、锁、错误映射和依赖注入。
+- `memory-bank/需求文档.md`：
+  - “检查点与恢复要求”：恢复必须基于最近持久化 checkpoint，`waiting_external_input` 不能被错误重放，已成功外部写入必须避免重复执行。
+  - “错误处理需求”：CLI 输出必须有统一错误口径、用户动作建议与可检查产物。
+  - “验收场景 5：中断恢复”：恢复命令必须从最近已持久化 checkpoint 恢复，并在 `outcome_unknown` 场景下先对账。
+- `memory-bank/技术方案.md`：
+  - `src/app` 职责：CLI 命令到 workflow 用例映射、依赖装配、run 级锁获取与释放、事务边界。
+  - “8.8 检查点策略”：durable 状态迁移要有 checkpoint，恢复默认不静默重跑已审批阶段，`prepared` / `dispatched` 未终态副作用必须先 reconcile。
+  - “17. 错误处理设计”：结构化错误、清晰提示、下一步动作建议、`outcome_unknown` 禁止直接盲重试。
+
+### 验证记录
+
+1. 验证对象：任务 5 app 红绿测试闭环
+   触发方式：先运行 `npm run test:unit -- tests/unit/app/run-lifecycle.spec.ts` 观察失败，再在实现后重复运行同一命令
+   预期结果：实现前因缺少 `src/app/index.ts` 与 run 生命周期导出而失败，实现后任务 5 新增 4 项断言全部通过
+   实际结果：通过；首轮失败准确暴露 `src/app/index.ts` 缺失，补实现并修正锁冲突错误映射后，`tests/unit/app/run-lifecycle.spec.ts` 4/4 通过
+
+2. 验证对象：根级测试聚合入口
+   触发方式：运行 `npm run test`
+   预期结果：任务 5 app 单元测试通过，任务 1-4 的 unit / acceptance 回归继续通过
+   实际结果：通过；unit 共 21/21 通过，integration 以 `--passWithNoTests` 退出码 0，acceptance `task1-project-skeleton` 4/4 通过
+
+3. 验证对象：TypeScript 类型检查
+   触发方式：运行 `npm run typecheck`
+   预期结果：新增 app 层导出、run 生命周期实现和测试夹具引用可通过类型检查
+   实际结果：通过；命令退出码为 0
+
+4. 验证对象：构建入口
+   触发方式：运行 `npm run build`
+   预期结果：新增 `src/app` 文件可被正常编译到 `dist/`
+   实际结果：通过；命令退出码为 0
+
+### 当前边界说明
+
+- 尚未开始任务 6；当前只实现 app 层最小装配、run 初始化、恢复入口路由与错误映射，不实现 `config-loader`、项目画像读取校验、CLI 子命令注册或真实 workflow 执行器。
+- 当前 `initializeRun()` 只负责建立任务 5 所需的初始上下文与 checkpoint 基线，不提前写入审计事件、artifact 导出或副作用账本。
+- 当前 `restoreRun()` 只负责选择恢复 checkpoint、加载最新上下文并输出恢复策略结论；真正的 reconcile 执行、阶段重放和审批恢复仍属于后续任务。

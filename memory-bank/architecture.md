@@ -223,3 +223,41 @@
 - `applyApprovalDecision()` 与 `applyRevisionRollback()` 分开，是为了把“审批如何改变当前 run”与“回退如何清理当前有效态”拆开。审批是瞬时决策，回退是对当前有效版本的批量失效；如果两者揉在一起，后续很容易把审批记录、阶段状态和 artifact 生命周期混写。
 - `applyRevisionRollback()` 只清理当前有效态，不删除历史 artifacts 或历史审批，是为了保持“历史事实保留、当前有效态收敛”这条主线。真正的历史落盘、checkpoint 与 superseded 审批写入仍应由后续 storage/app 层承担。
 - `getRecoveryAction()` 先返回策略结论而不是直接做 reconcile/重试，是刻意保持 workflow 规则层与副作用执行层解耦。这样任务 5 可以在 app 层根据同一判断结果决定是继续等待、进入 reconcile 入口，还是提示人工复核，而不用把 I/O 逻辑反塞回 workflow。
+
+## 任务 5 当前 app 装配层
+
+任务 5 完成后，`src/app` 不再只是 CLI 的空壳入口，而是开始承担“命令应该落到哪个 use case、run 如何被初始化、恢复入口如何路由、错误如何统一折叠为 CLI 结果”的应用装配职责。这个阶段仍然不实现具体业务阶段执行器，也不抢走 workflow 的状态 owner 身份。
+
+## 新增文件职责
+
+### `src/app/use-cases.ts`
+
+- 固定 CLI 命令组到 app use case 的最小映射边界：`bind`、`inspect`、`run`、`record`。
+- 让 CLI 后续只需要关心“我要调哪个 app 入口”，而不需要理解 workflow 状态机、storage 路径或错误映射细节。
+- 把命令组与 use case id 收敛为显式常量，减少后续任务 15 实现 CLI 子命令时出现一边写字符串、一边绕过 app 层的风险。
+
+### `src/app/run-lifecycle.ts`
+
+- 提供任务 5 的核心应用装配能力：`initializeRun()`、`restoreRun()`、`mapErrorToCliFailure()`。
+- `initializeRun()` 负责组装初始 `ExecutionContext`、生成 `run_id`、创建 run 目录、获取初始锁、写入 `context.json` 与首个 checkpoint，确保新 run 一创建就具备可恢复基础。
+- `restoreRun()` 负责读取最新上下文、选择最近或指定 checkpoint、调用 workflow 的 `getRecoveryAction()` 判定恢复入口，并在需要时注入 active error / latest side effect 状态做 reconcile-first 路由。
+- `mapErrorToCliFailure()` 把 `StructuredError`、run 锁冲突和恢复缺口统一折叠为 CLI 可消费的退出码、摘要和下一步建议动作，避免错误口径散落在 CLI、workflow 和 storage 之间。
+- 文件中同时保留 `RunStateNotFoundError`、`CheckpointNotFoundError` 等 app 层错误，以表达“这是运行态装配失败”，而不是 workflow 规则错误。
+
+### `src/app/index.ts`
+
+- 作为 app 层唯一公共导出入口，统一暴露 bootstrap、use case 边界和 run 生命周期能力。
+- 保持后续 CLI 与测试只依赖 `src/app` 公共面，而不需要跨文件引用内部细节。
+
+### `tests/unit/app/run-lifecycle.spec.ts`
+
+- 任务 5 的 app 单元测试。
+- 先锁定四个最小闭环：命令组到 use case 映射、run 初始化产物、恢复入口路由、错误到退出码映射。
+- 通过红绿测试验证 app 层确实是新加出来的装配面，而不是对已有行为做“绿灯式补测”。
+
+## 任务 5 架构洞察
+
+- 任务 5 的关键不是让 CLI 立刻跑完整主流程，而是先把“CLI 与 workflow 中间那层”补出来。没有 app 层，命令注册、锁管理、恢复路由和错误映射会自然散落到 CLI 命令处理器里，后续越做越难收口。
+- `use-cases.ts` 与 `run-lifecycle.ts` 分开，是为了把“命令边界”与“运行态装配”拆开。前者是静态映射契约，后者是有 I/O、有状态文件读写和恢复判定的用例逻辑；分开后任务 15 做命令面时更容易保持 CLI 只做参数适配。
+- `restoreRun()` 没有直接把 reconcile、阶段执行或审批恢复做掉，而是只输出恢复策略结论。这延续了任务 4 的边界：workflow 定义规则，app 负责路由和装配，真正执行哪个阶段仍留给后续任务。
+- 错误映射集中在 app 层而不是 CLI 层，是因为 app 更接近 domain/storage/workflow 三方交汇处，能在不泄漏底层细节的前提下统一用户可见结果；这样以后 CLI 的 TTY/JSON 两种输出模式可以共享同一份失败语义。

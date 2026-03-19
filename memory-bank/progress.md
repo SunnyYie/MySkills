@@ -309,3 +309,61 @@
 - 尚未开始任务 7；当前只实现项目画像加载/校验、分段绑定写入和 `inspect` 只读体检，不实现 Jira intake、需求线索提取、项目匹配或仓库模块解析。
 - 当前 `bind` 只接收显式 JSON 文件输入并维护项目画像草稿，不触发 run 创建、workflow 状态推进、preview 生成或任何外部副作用。
 - 当前 `inspect connectors` 只做本地配置完备性与 repo 路径可访问性检查，不调用 Jira / GitLab / 飞书真实接口，因此“ready” 表示配置就绪而非远端联通性已验证。
+
+## 2026-03-19 - 任务 7：实现 Jira Intake 与项目上下文解析
+
+### 本轮完成内容
+
+- 在 `src/domain/enums.ts` 与 `src/domain/schemas.ts` 中补齐任务 7 的最小契约：新增 `StageResult` 状态、`JiraIssueSnapshot`、`JiraIssueRequirementHint`、`JiraIssueWritebackTarget`、`RequirementCandidate`、`JiraIntakeData`、`ProjectContextData` 及对应 stage result schema，让 `Intake` / `Context Resolution` 先有稳定输入输出，再由后续 workflow 编排接入。
+- 在 `src/infrastructure/connectors/jira/index.ts` 中实现 Jira connector 的最小只读映射能力：把原始 issue 记录规整为 `JiraIssueSnapshot`，显式保留描述、状态、标签、需求线索和写回目标，并补充 `permission_denied` / `validation_error` 的结构化错误语义。
+- 在 `src/skills/jira-intake/index.ts` 中实现 `runJiraIntake()`，把结构化快照整理为 `StageResult`，确保 skill 只消费快照、不依赖 Jira 原始接口。
+- 在 `src/infrastructure/repo/workspace.ts` 中实现 Repo Workspace Adapter 的最小只读能力：验证 `repo.local_path` 的绝对路径与可访问性，根据 issue 标签/文本信号解析模块候选，并在 repo 不可访问时返回 `repo_resolution_failed`。
+- 在 `src/skills/project-context/index.ts` 中实现 `resolveProjectContext()`：按 `ProjectProfile.jira.requirement_link_rules` 的优先级解析 requirement 绑定，覆盖唯一命中、多候选等待人工选择、未命中但允许 `unresolved` 继续，以及 repo 打不开时的失败语义。
+- 新增 `tests/unit/intake/jira-intake.spec.ts` 与 `tests/unit/intake/project-context.spec.ts`，通过红绿测试锁定任务 7 的最小行为闭环。
+
+### 依据
+
+- 用户指令：阅读 `memory-bank` 全部文档后继续执行实施计划任务 7；在验证通过前不开始任务 8；测试通过后更新 `progress.md` 与 `architecture.md`；在 worktree 代码测试通过后合并到 `main`。
+- `memory-bank/实施计划.md` 任务 7：要求实现 Jira bug 读取、需求线索提取、项目匹配、仓库定位和模块候选解析，并定义合法 issue、权限不足、需求映射失败和多候选需求时的错误或等待语义。
+- `memory-bank/需求文档.md`：
+  - “Jira 集成需求”：`Intake` 需要读取 bug 基础信息、描述、状态、标签和需求线索。
+  - “关联需求识别规则”：绑定规则必须支持多来源、优先级排序、无法识别时的阻塞/人工指定/降级为 `unresolved`，以及多候选时人工确认。
+  - “未绑定需求处理策略”：当允许继续时必须显式标记 `requirement_binding_status = unresolved` 并保留 `binding_reason`。
+- `memory-bank/技术方案.md`：
+  - `jira-intake` / `project-context`：skill 只消费已读取的结构化对象并返回结构化 `StageResult<T>`。
+  - “11.2 Jira Connector”：connector 负责读取状态、描述、标签、关联线索和回写目标。
+  - “11.5 Repo Workspace Adapter”：负责根据 `repo.local_path` 打开本地仓库，并根据 `repo.module_rules` 解析模块候选。
+
+### 验证记录
+
+1. 验证对象：任务 7 红灯起点
+   触发方式：先运行 `npm run test:unit -- tests/unit/intake/jira-intake.spec.ts tests/unit/intake/project-context.spec.ts`
+   预期结果：在实现前准确因为缺少 Jira connector / intake / project-context 模块而失败，而不是误绿
+   实际结果：通过；首轮失败准确暴露 `src/infrastructure/connectors/jira/index.ts` 缺失，说明新增测试确实在覆盖任务 7 的新能力面
+
+2. 验证对象：任务 7 Intake / Context Resolution 单元闭环
+   触发方式：补实现后再次运行 `npm run test:unit -- tests/unit/intake/jira-intake.spec.ts tests/unit/intake/project-context.spec.ts`
+   预期结果：Jira 快照映射、权限错误语义、需求绑定优先级、多候选等待、`unresolved` 回退和 repo 解析异常全部通过
+   实际结果：通过；新增 7 项断言全部通过，其中一次失败暴露“显式 `module:` 标签应优先于自由文本匹配”，修正后重新验证通过
+
+3. 验证对象：根级测试聚合入口
+   触发方式：运行 `npm test`
+   预期结果：任务 7 新增 unit 测试通过，任务 1-6 的既有 unit / integration / acceptance 回归继续通过
+   实际结果：通过；unit 共 32/32 通过，integration `config-commands` 2/2 通过，acceptance `task1-project-skeleton` 4/4 通过
+
+4. 验证对象：TypeScript 类型检查
+   触发方式：运行 `npm run typecheck`
+   预期结果：新增 domain 契约、connector、repo adapter、skills 与测试夹具可通过类型检查
+   实际结果：通过；命令退出码为 0
+
+5. 验证对象：构建入口
+   触发方式：运行 `npm run build`
+   预期结果：新增 `src/infrastructure/connectors/jira`、`src/infrastructure/repo/workspace.ts`、`src/skills/jira-intake`、`src/skills/project-context` 可正常编译到 `dist/`
+   实际结果：通过；命令退出码为 0
+
+### 当前边界说明
+
+- 尚未开始任务 8；当前只实现 `Intake` / `Context Resolution` 所需的最小结构化快照、绑定策略和 repo 解析，不生成 `Requirement Brief`，也不补 `Requirement Synthesis` 的 renderer / 导出逻辑。
+- 当前 Jira connector 仍然是“结构化映射层”，不直接发起真实 Jira 网络读取；真实 reader capability、认证和远端健康检查仍属于后续 infrastructure 任务。
+- 当前 requirement 绑定依赖 `JiraIssueSnapshot.requirement_hints` 这一已标准化输入；它刻意避免 skill 直接读取 Jira 原始字段，以保持 connector owner 清晰。
+- 当前模块候选收敛规则为“显式 `module:<id>` 标签优先，其次才是 summary/description/label 自由文本命中”；如果没有模块信号，会保留 repo 上下文并输出 warning，而不是静默猜测唯一模块。

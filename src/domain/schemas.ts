@@ -14,6 +14,7 @@ import {
   RUN_MODES,
   RUN_OUTCOME_STATUSES,
   SIDE_EFFECT_STATUSES,
+  STAGE_RESULT_STATUSES,
   STAGE_STATUSES,
 } from './enums.js';
 
@@ -24,6 +25,7 @@ const JsonValueSchema = z.json();
 
 const StageSchema = z.enum(BUGFIX_STAGES);
 const StageStatusSchema = z.enum(STAGE_STATUSES);
+const StageResultStatusSchema = z.enum(STAGE_RESULT_STATUSES);
 const ApprovalDecisionSchema = z.enum(APPROVAL_DECISIONS);
 const ApprovalStatusSchema = z.enum(APPROVAL_STATUSES);
 const RunLifecycleStatusSchema = z.enum(RUN_LIFECYCLE_STATUSES);
@@ -59,6 +61,8 @@ export const RequirementLinkRuleSchema = z
     fallback_action: z.enum(['block', 'manual', 'unresolved']),
   })
   .strict();
+
+const RequirementHintSourceSchema = RequirementLinkRuleSchema.shape.source_type;
 
 export const RepoModuleRuleSchema = z
   .object({
@@ -249,6 +253,37 @@ export const JiraWritebackDraftSchema = z
   })
   .strict();
 
+export const JiraIssueRequirementHintSchema = z
+  .object({
+    source_type: RequirementHintSourceSchema,
+    values: z.array(NonEmptyStringSchema).min(1),
+    source_field: NonEmptyStringSchema,
+  })
+  .strict();
+
+export const JiraIssueWritebackTargetSchema = z
+  .object({
+    target_type: JiraWritebackTargetTypeSchema,
+    target_field_id_or_comment_mode: NonEmptyStringSchema,
+  })
+  .strict();
+
+export const JiraIssueSnapshotSchema = z
+  .object({
+    issue_key: NonEmptyStringSchema,
+    issue_id: NonEmptyStringSchema,
+    issue_type_id: NonEmptyStringSchema,
+    project_key: NonEmptyStringSchema,
+    summary: NonEmptyStringSchema,
+    description: NonEmptyStringSchema,
+    status_name: NonEmptyStringSchema,
+    labels: z.array(NonEmptyStringSchema),
+    source_url: UrlSchema.nullable(),
+    requirement_hints: z.array(JiraIssueRequirementHintSchema),
+    writeback_targets: z.array(JiraIssueWritebackTargetSchema).min(1),
+  })
+  .strict();
+
 export const JiraWritebackResultSchema = z
   .object({
     result_id: NonEmptyStringSchema,
@@ -353,10 +388,40 @@ export const RepoSelectionSchema = z
   })
   .strict();
 
+export const RequirementCandidateSchema = z
+  .object({
+    requirement_ref: NonEmptyStringSchema,
+    source_type: RequirementHintSourceSchema,
+    priority: z.number().int().nonnegative(),
+    reason: NonEmptyStringSchema,
+  })
+  .strict();
+
 export const CodeTargetSchema = z
   .object({
     file_path: NonEmptyStringSchema,
     reason: NonEmptyStringSchema,
+  })
+  .strict();
+
+export const JiraIntakeDataSchema = z
+  .object({
+    issue_key: NonEmptyStringSchema,
+    issue_status: NonEmptyStringSchema,
+    requirement_hint_count: z.number().int().nonnegative(),
+    writeback_target_count: z.number().int().nonnegative(),
+  })
+  .strict();
+
+export const ProjectContextDataSchema = z
+  .object({
+    project_id: NonEmptyStringSchema,
+    requirement: RequirementReferenceSchema,
+    requirement_candidates: z.array(RequirementCandidateSchema),
+    repo_selection: RepoSelectionSchema,
+    requirement_source_ref: NonEmptyStringSchema,
+    gitlab_project_id: NonEmptyStringSchema,
+    gitlab_default_branch: NonEmptyStringSchema,
   })
   .strict();
 
@@ -450,6 +515,25 @@ export const StructuredErrorSchema = z
     }
   });
 
+export const createStageResultSchema = <T extends z.ZodTypeAny>(dataSchema: T) =>
+  z
+    .object({
+      status: StageResultStatusSchema,
+      summary: NonEmptyStringSchema,
+      data: dataSchema.nullable(),
+      warnings: z.array(NonEmptyStringSchema),
+      errors: z.array(StructuredErrorSchema),
+      waiting_for: NonEmptyStringSchema.nullable(),
+      source_refs: z.array(NonEmptyStringSchema).min(1),
+      generated_at: TimestampSchema,
+    })
+    .strict();
+
+export const JiraIntakeStageResultSchema = createStageResultSchema(JiraIntakeDataSchema);
+export const ProjectContextStageResultSchema = createStageResultSchema(
+  ProjectContextDataSchema,
+);
+
 export type ProjectProfile = z.infer<typeof ProjectProfileSchema>;
 export type ExecutionContext = z.infer<typeof ExecutionContextSchema>;
 export type RequirementBrief = z.infer<typeof RequirementBriefSchema>;
@@ -458,3 +542,25 @@ export type ApprovalRecord = z.infer<typeof ApprovalRecordSchema>;
 export type SideEffectLedgerEntry = z.infer<typeof SideEffectLedgerEntrySchema>;
 export type CheckpointRecord = z.infer<typeof CheckpointRecordSchema>;
 export type StructuredError = z.infer<typeof StructuredErrorSchema>;
+export type JiraIssueSnapshot = z.infer<typeof JiraIssueSnapshotSchema>;
+export type JiraIssueRequirementHint = z.infer<typeof JiraIssueRequirementHintSchema>;
+export type JiraIssueWritebackTarget = z.infer<typeof JiraIssueWritebackTargetSchema>;
+export type RequirementCandidate = z.infer<typeof RequirementCandidateSchema>;
+export type JiraIntakeData = z.infer<typeof JiraIntakeDataSchema>;
+export type ProjectContextData = z.infer<typeof ProjectContextDataSchema>;
+export type RepoSelection = z.infer<typeof RepoSelectionSchema>;
+export type StageResultStatus = z.infer<typeof StageResultStatusSchema>;
+export type StageResult<T> = {
+  status: StageResultStatus;
+  summary: string;
+  data: T | null;
+  warnings: string[];
+  errors: StructuredError[];
+  waiting_for: string | null;
+  source_refs: string[];
+  generated_at: string;
+};
+export type JiraIntakeStageResult = z.infer<typeof JiraIntakeStageResultSchema>;
+export type ProjectContextStageResult = z.infer<
+  typeof ProjectContextStageResultSchema
+>;

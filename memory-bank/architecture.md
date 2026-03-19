@@ -335,3 +335,82 @@
 - `bind` 没有直接要求一次性写入整份 `ProjectProfile`，而是支持 section 级维护，是为了贴合需求文档里“配置缺失必须支持补录”的节奏；否则用户只能手工编辑完整 JSON，CLI 的绑定价值会被削弱。
 - `inspect connectors` 目前只做到“配置就绪”和“本地 repo 路径可访问”两个层次，没有冒进做远端连通性探测，是刻意遵守任务 6 边界。真正的 Jira / GitLab / 飞书接口体检应该留在 connector 层和更后面的任务里。
 - 在 `createProgram()` 里引入可注入 `io` / `env`，看起来像测试细节，实际是在为后续任务 15 的 TTY/JSON 双输出、非交互模式和更稳定的 CLI 集成测试提前埋接缝；这能减少以后再回头重拆 `process.stdout` / `process.env` 的成本。
+
+## 任务 7 当前 Intake 与 Context Resolution 层
+
+任务 7 完成后，仓库第一次拥有了 `Intake` 与 `Context Resolution` 的实际结构化输入输出。这个阶段仍然只做“只读解析和语义归一化”，不提前进入真实 Jira 网络访问、代码定位或 brief 渲染。
+
+## 新增文件职责
+
+### `src/domain/enums.ts`
+
+- 在既有 workflow 枚举之外，新增 `STAGE_RESULT_STATUSES`，把 skill 输出状态显式收敛为 `completed`、`waiting`、`failed`。
+- 这样后续 workflow 接 skill 结果时，可以明确区分“可继续推进”“等待人工补录”和“硬失败”，而不是靠错误数组是否为空来猜。
+
+### `src/domain/schemas.ts`
+
+- 补齐任务 7 需要的结构化契约：`JiraIssueSnapshotSchema`、`JiraIssueRequirementHintSchema`、`JiraIssueWritebackTargetSchema`、`RequirementCandidateSchema`、`JiraIntakeDataSchema`、`ProjectContextDataSchema`。
+- 新增 `createStageResultSchema()` 以及 `JiraIntakeStageResultSchema`、`ProjectContextStageResultSchema`，把技术方案里建议的 `StageResult<T>` 真正落成可校验的公共契约。
+- 保持 `RequirementReferenceSchema` 继续作为“resolved / unresolved 必须怎么表达”的唯一来源，避免 `project-context` 自己拼半结构化对象。
+
+### `src/infrastructure/connectors/jira/index.ts`
+
+- 提供 Jira connector 当前阶段的最小只读映射入口 `buildJiraIssueSnapshot()`。
+- 负责把原始 issue 记录规整为稳定的 `JiraIssueSnapshot`，显式保留摘要、描述、状态、标签、需求线索和写回目标，而不是让 skill 自己理解 Jira 字段细节。
+- 提供 `createJiraPermissionDeniedError()` 与 `createInvalidJiraIssueError()`，先把 Intake 阶段最关键的错误语义固定下来。
+
+### `src/infrastructure/connectors/index.ts`
+
+- 不再是空锚点，开始统一暴露 connector 层的 Jira 读模型映射能力。
+- 保持后续 connector 扩展时仍有统一出口。
+
+### `src/infrastructure/repo/workspace.ts`
+
+- 提供 Repo Workspace Adapter 的当前最小实现 `inspectRepoWorkspace()`。
+- 负责三件事：校验 `repo.local_path` 是否为可访问的绝对路径、根据 issue 信号解析模块候选、在 repo 不可打开时返回 `repo_resolution_failed`。
+- 刻意保持为只读能力，不进入文件搜索、git 元数据读取或代码修改。
+
+### `src/infrastructure/repo/index.ts`
+
+- 统一暴露 repo workspace 能力，让 skill 层只依赖 infrastructure 公共面。
+
+### `src/infrastructure/index.ts`
+
+- 开始把 connectors 与 repo 两类基础设施能力汇总导出。
+- 让后续 app / workflow / tests 不需要跨层知道内部子目录结构。
+
+### `src/skills/jira-intake/index.ts`
+
+- 提供 `runJiraIntake()`。
+- 只消费 `JiraIssueSnapshot`，输出标准化 `StageResult`，确保 `jira-intake` 遵守“skill 不直接做 I/O”的上位约束。
+- 当前只负责“读到了什么、有哪些 requirement hint、有哪些 writeback target”，不提前做 requirement 绑定裁决。
+
+### `src/skills/project-context/index.ts`
+
+- 提供 `resolveProjectContext()`，是任务 7 的核心 skill。
+- 负责根据 `ProjectProfile.jira.requirement_link_rules` 的优先级解析 requirement 绑定，根据 repo adapter 输出仓库与模块候选，并把结果折叠为 `completed / waiting / failed` 三类 stage result。
+- 手工覆盖入口 `manualRequirementRef` 保留在这里，而不是埋进 workflow，是因为这仍属于“上下文解析结果怎么定”的技能语义。
+
+### `src/skills/index.ts`
+
+- 开始把 `jira-intake` 与 `project-context` 纳入 skills 公共出口。
+- 让后续任务引用 skills 时延续统一导出方式。
+
+### `tests/unit/intake/jira-intake.spec.ts`
+
+- 任务 7 的 Jira Intake 单元测试。
+- 锁定三件事：Jira 快照字段完整性、skill 只消费快照、权限不足错误语义稳定。
+
+### `tests/unit/intake/project-context.spec.ts`
+
+- 任务 7 的 Project Context 单元测试。
+- 覆盖唯一 requirement 命中、多候选等待人工、未命中但允许 `unresolved` 继续、repo 打不开时失败四个最小场景。
+- 其中“显式 `module:` 标签优先于自由文本匹配”的断言，防止后续模块候选解析重新退回模糊猜测。
+
+## 任务 7 架构洞察
+
+- 任务 7 最关键的收敛，不是“先连上 Jira”，而是先把 Jira 原始字段和 skill 消费面隔开。`JiraIssueSnapshot` 的引入，让 connector 拥有字段解释权，skill 只关心结构化快照，这能明显降低后续换接入方式或补 reader capability 时的耦合。
+- requirement 绑定没有直接从 Jira 原始描述、label 或 custom field 硬编码推断，而是统一通过 `requirement_hints` 进入 skill。这保住了需求文档里“connector 隐藏接入细节、skill 输入输出清晰”的主线，也避免不同 skill 各自实现一套线索提取逻辑。
+- `project-context` 输出 `waiting` 而不是把多候选或缺少人工绑定都当成 `failed`，是为了贴合工作流里的“等待人工补录”语义；但 repo 路径打不开仍然是 `failed`，因为它表示项目画像或执行环境本身不可用，两者不应混为一类阻塞。
+- 模块候选解析采用“显式信号优先、自由文本兜底、无信号则保留 repo 级上下文”的策略，是为了在不静默猜测唯一模块的前提下，仍给后续 `Code Localization` 提供一个可继续收敛的起点。
+- 把 `StageResult` 先落到 domain 契约里，而不是只在任务 7 本地声明类型，能让后续 `Requirement Synthesis`、`Code Localization`、`Fix Planning` 复用同一种完成/等待/失败表达，减少每个 skill 各自发明返回结构的风险。

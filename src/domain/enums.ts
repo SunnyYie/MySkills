@@ -23,6 +23,12 @@ export const STAGE_STATUSES = [
   'skipped',
 ] as const;
 
+export const STAGE_RESULT_STATUSES = [
+  'completed',
+  'waiting',
+  'failed',
+] as const;
+
 export const APPROVAL_DECISIONS = ['approve', 'reject', 'revise'] as const;
 
 export const APPROVAL_STATUSES = [

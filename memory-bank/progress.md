@@ -423,3 +423,60 @@
 - 尚未开始任务 9；当前只实现 `Requirement Brief` 的结构化生成与 CLI / Markdown 渲染，不实现代码搜索、候选文件定位、影响模块扩展分析或根因假设推断。
 - 当前 brief 的 `source_refs` 已作为后续 artifact / checkpoint 绑定的稳定输入面，但本轮没有提前把 brief 真正写入 run artifacts、审批记录或 checkpoint；这些物理绑定仍属于后续 workflow / storage 接入任务。
 - 当前 `fix_goal` 与 `known_context` 采用“结构化输入归纳 + 稳定模板表达”的方式生成，刻意避免引入自由发挥式总结或额外需求扩写。
+
+## 2026-03-19 - 任务 9：实现 `Code Localization`
+
+### 本轮完成内容
+
+- 在 `src/domain/schemas.ts` 中新增 `CodeLocalizationDataSchema` 与 `CodeLocalizationStageResultSchema`，把任务 9 的最小输出面固定为 `impact_modules`、`code_targets`、`root_cause_hypotheses` 三部分，并继续复用统一 `StageResult<T>` 契约。
+- 在 `src/infrastructure/repo/workspace.ts` 中补充 Repo Workspace Adapter 的只读代码搜索能力：解析 `repo.module_rules` 的搜索根路径、递归读取候选目录、归一化为相对仓库路径，并基于 issue / brief 信号做最小命中排序。
+- 在 `src/skills/code-locator/index.ts` 中实现 `locateCodeTargets()`：消费 `ProjectProfile`、`JiraIssueSnapshot`、`ProjectContextData`、`RequirementBrief`，输出唯一命中、无结果、多个候选三类稳定结构化结果，并显式保留 `source_refs`、影响模块和根因假设。
+- 在 `src/skills/index.ts` 中纳入 `code-locator` 公共导出，保持 skills 层统一入口不漂移。
+- 新增 `tests/unit/code-locator/code-locator.spec.ts`，通过红绿测试锁定任务 9 的最小闭环：路径归一化、唯一命中完成态、无结果等待态、多候选等待态、影响模块输出与根因假设表达。
+
+### 依据
+
+- 用户指令：请阅读所有 `memory-bank` 文档，并继续执行实施计划的任务 9；在验证测试结果之前不要开始下一个任务；测试验证通过后更新 `progress.md`，补充架构文档，并且不要进入任务 10。
+- `memory-bank/实施计划.md` 任务 9：要求实现 `Code Localization`，覆盖模块规则解析、仓库只读搜索、候选路径归一化、唯一/无结果/多候选分支、影响模块、根因假设以及可回溯输出。
+- `memory-bank/需求文档.md`：
+  - “Code Localization” 阶段要求：在不改代码的前提下生成候选代码位置、影响模块和根因假设。
+  - “ExecutionContext 最小字段集”：后续运行态必须保留 `repo_selection`、`code_targets`、`root_cause_hypotheses`。
+  - “Requirement Brief” 作为后续阶段输入依据：任务 9 需要消费已生成的 brief，而不是重新从 Jira 原始文本自由拼接。
+- `memory-bank/技术方案.md`：
+  - “10.2 code-locator”：`code-locator` 负责输出代码位置候选、影响模块和根因假设。
+  - “11.5 Repo Workspace Adapter”：基础设施层负责根据 `repo.local_path` 打开本地仓库、执行文件搜索、路径归一化和候选定位，且必须保持只读。
+  - “7.2 ExecutionContext”：代码定位结果最终需要以 `code_targets` / `root_cause_hypotheses` 的形式进入 workflow 当前有效态。
+
+### 验证记录
+
+1. 验证对象：任务 9 红灯起点
+   触发方式：先运行 `npm run test:unit -- tests/unit/code-locator/code-locator.spec.ts`
+   预期结果：实现前因缺少 `src/skills/code-locator/index.ts` 而失败，而不是误绿
+   实际结果：通过；首轮失败准确暴露 `src/skills/code-locator/index.ts` 缺失，说明新增测试确实覆盖到了任务 9 的新能力面
+
+2. 验证对象：任务 9 Code Localization 单元闭环
+   触发方式：补实现后再次运行 `npm run test:unit -- tests/unit/code-locator/code-locator.spec.ts`
+   预期结果：唯一命中、无结果、多候选三类结果，以及路径归一化、影响模块和根因假设字段全部通过
+   实际结果：通过；新增 3 项断言全部通过，期间一次失败准确暴露 `code-locator` 内部字段名接错，修正后重新验证通过
+
+3. 验证对象：根级测试聚合入口
+   触发方式：运行 `npm test`
+   预期结果：任务 9 新增 unit 测试通过，任务 1-8 的既有 unit / integration / acceptance 回归继续通过
+   实际结果：通过；unit 共 38/38 通过，integration `config-commands` 2/2 通过，acceptance `task1-project-skeleton` 4/4 通过
+
+4. 验证对象：TypeScript 类型检查
+   触发方式：运行 `npm run typecheck`
+   预期结果：新增 `Code Localization` 契约、repo 搜索能力与 skill 导出可通过类型检查
+   实际结果：通过；命令退出码为 0
+
+5. 验证对象：构建入口
+   触发方式：运行 `npm run build`
+   预期结果：新增 `src/skills/code-locator` 与 `src/infrastructure/repo/workspace.ts` 的更新可正常编译到 `dist/`
+   实际结果：通过；命令退出码为 0
+
+### 当前边界说明
+
+- 尚未开始任务 10；当前只实现任务 9 所需的只读代码定位与结构化输出，不生成 fix summary、验证建议、开放风险，也不接入 `Fix Planning` 审批门。
+- 当前代码搜索策略刻意保持最小：只在 `repo.module_rules` 解析出的目录下递归读取文本文件，并基于 issue / brief 的稳定词项做命中排序；没有提前引入 AST、语义索引、Git 历史或复杂启发式。
+- 当前“定位产物保存与可回溯”先通过 `StageResult` 的 `source_refs`、归一化 `code_targets` 和稳定 `impact_modules` 输出面固定下来；真正写入 run artifact、checkpoint 或审批绑定仍属于后续 workflow / storage 任务。
+- 当前 `impact_modules` 仍以 `ProjectContext` 阶段已有的模块候选为主，命中结果只在未预先缩窄模块时作为补充，不在本轮抢先重定义 `ExecutionContext` 字段。

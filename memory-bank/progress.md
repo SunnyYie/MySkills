@@ -101,3 +101,53 @@
 - 尚未开始任务 3；当前只冻结 domain 契约和投影边界，不实现实际落盘、脱敏、文件锁、checkpoint 写入或 side effect ledger 持久化逻辑。
 - `run_mode` 当前采用 `full`、`brief_only`、`jira_writeback_only`、`feishu_record_only` 四值，依据现有主流程与三个子工作流命名收敛；若后续上位文档显式补充其他模式，应先更新文档基线再改 schema。
 - Jira `target_type` 当前收敛为 `comment | field`，用于先固定写回契约的最小判别维度；未提前扩展更多 Jira 写入目标类型。
+
+## 2026-03-19 - 任务 3：定义持久化与脱敏基础
+
+### 本轮完成内容
+
+- 在 `src/storage/layout.ts` 中固定本地持久化基线：项目画像默认落在 `~/.config/bugfix-orchestrator/projects/<project_id>.json`，run 默认落在 `~/.local/share/bugfix-orchestrator/runs/<run_id>/`，并冻结 `context.json`、`events.ndjson`、`side-effects.ndjson`、`checkpoints/`、`artifacts/`、`lock` 的目录布局与职责说明。
+- 在 `src/storage/layout.ts` 中定义 `ExecutionContext`、checkpoint、artifact metadata、report、audit event 的落盘 allowlist，以及 dry-run preview 默认持久化、必须标记 `dry_run_preview`、不得写出成功副作用账本记录的策略常量。
+- 在 `src/storage/filesystem.ts` 中实现任务 3 需要的最小文件系统基线：`0700` 目录创建、`0600` 文件原子写、run 级独占锁、checkpoint 文件命名与按序读取，确保后续恢复逻辑建立在稳定的物理约束上。
+- 在 `src/security/redaction.ts` 中实现统一 redaction 入口，默认遮蔽 `Authorization`、`Cookie`、`credential_ref`、`request_payload` 等敏感字段，并支持对 `sensitiveFieldPaths` 指定的自由文本路径做落盘脱敏。
+- 新增 `tests/unit/storage/persistence-foundation.spec.ts` 与 `tests/unit/security/redaction.spec.ts`，用单元测试锁定任务 3 的最小契约，避免后续 app/workflow/connector 层绕开 allowlist、锁语义或脱敏规则。
+
+### 依据
+
+- 用户指令：继续执行实施计划任务 3；在验证通过之前不进入任务 4，验证通过后更新 `progress.md` 与 `architecture.md`，并在 worktree 验证通过后合并回 `main`。
+- `memory-bank/实施计划.md` 任务 3：先固定持久化路径、run 目录职责、落盘 allowlist、dry-run 持久化边界、redaction 规则、原子写与文件锁语义。
+- `memory-bank/需求文档.md`：
+  - “检查点与恢复要求”：恢复必须基于最近持久化 checkpoint，已成功外部写入必须具备去重依据。
+  - “CLI 需求”：v1 必须具备阶段结果序列化保存与恢复执行能力。
+  - “安全与凭证需求”：敏感字段不得明文落盘，必须支持标记敏感字段路径。
+- `memory-bank/技术方案.md`：
+  - “12. 持久化与审计设计”：固定本地文件系统持久化路径、run 目录布局、原子写顺序与副作用账本职责。
+  - “16. 安全与脱敏设计”：`credential_ref` 仅作为引用存在，`request_payload` 等敏感内容不得明文落盘，日志/checkpoint/report/artifacts 都需要 redaction。
+
+### 验证记录
+
+1. 验证对象：任务 3 storage/security 红绿测试闭环
+   触发方式：先运行 `npm run test:unit -- tests/unit/storage/persistence-foundation.spec.ts` 与 `npm run test:unit -- tests/unit/security/redaction.spec.ts` 观察失败，再在实现后重复运行同样命令
+   预期结果：实现前因为缺少 storage/security 出口与规则实现而失败，实现后任务 3 新增断言全部通过
+   实际结果：通过；首轮失败暴露 `getRunPaths`、`EXECUTION_CONTEXT_ALLOWLIST`、`redactForStorage` 等缺失，补实现后 storage/security 新增 4 个断言全部通过
+
+2. 验证对象：全量单元测试与既有 domain 契约回归
+   触发方式：运行 `npm run test`
+   预期结果：任务 3 单元测试通过，任务 2 的 domain 契约测试继续通过，任务 1 的 acceptance 测试不回退
+   实际结果：通过；unit 共 13/13 通过，integration 以 `--passWithNoTests` 退出码 0，acceptance `task1-project-skeleton` 4/4 通过
+
+3. 验证对象：TypeScript 类型检查
+   触发方式：运行 `npm run typecheck`
+   预期结果：新增 storage/security 模块和导出入口可通过类型检查
+   实际结果：通过；命令退出码为 0
+
+4. 验证对象：构建入口
+   触发方式：运行 `npm run build`
+   预期结果：新增 `src/storage`、`src/security` 文件可被编译到 `dist/`
+   实际结果：通过；命令退出码为 0
+
+### 当前边界说明
+
+- 尚未开始任务 4；当前只定义持久化布局、allowlist、dry-run 标记、redaction 入口和基础文件系统语义，不实现工作流状态机、审批流转、恢复入口路由或 reconcile 决策。
+- 当前 redaction 只覆盖任务 3 上位文档明确要求的敏感键和显式 `sensitiveFieldPaths`；若后续 connector 引入新的敏感字段类别，应先补充文档基线或任务说明，再扩展规则。
+- 当前 checkpoint 读取一致性建立在“命名按序 + schema 校验 + 顺序读取”之上；更高阶的恢复策略、未终态副作用 reconcile 与 target 级全局锁仍属于任务 4/后续任务。

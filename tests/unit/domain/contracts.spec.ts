@@ -236,9 +236,13 @@ describe('domain contracts', () => {
         issue_key: 'BUG-123',
         target_type: 'comment',
         target_field_id_or_comment_mode: 'comment',
+        target_ref: 'jira://BUG-123/comment',
         rendered_preview: 'Will link commit abcdef',
         request_payload: { body: 'payload' },
+        request_payload_hash: 'sha256:payload',
         idempotency_key: 'jira:BUG-123:comment:abcdef',
+        dedupe_scope: 'jira:BUG-123:comment',
+        expected_target_version: null,
       }).success,
     ).toBe(true);
 
@@ -248,6 +252,8 @@ describe('domain contracts', () => {
         target_ref: 'jira://BUG-123/comment/9001',
         target_version: '17',
         result_url: 'https://jira.example.com/browse/BUG-123?focusedCommentId=9001',
+        already_applied: false,
+        external_request_id: 'req-123',
         updated_at: '2026-03-19T10:30:00.000Z',
       }).success,
     ).toBe(true);

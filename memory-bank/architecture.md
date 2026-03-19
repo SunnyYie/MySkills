@@ -643,3 +643,56 @@
 - GitLab 产物标准化放在 skill 层、等待语义和合并保护放在 workflow 层，是这轮最关键的 owner 划分。前者解决“输入长什么样”，后者解决“当前 run 怎么吸收它”；两者拆开后，任务 12 再去生成 Jira preview 时就不需要重新定义 artifact 契约。
 - 冲突补录不是直接覆盖当前有效态，而是返回 `state_conflict` 并保持原上下文不变，这是为了符合需求文档里“失败后保留现场”和技术方案里“workflow 是唯一状态 owner”的原则。否则 `Execution` 会变成一个可以悄悄篡改有效产物的薄弱点。
 - 这轮故意没有把 `Execution` 接到真实 checkpoint 写入、CLI `record` 命令或 Jira/飞书链路，是刻意遵守实施计划的小步推进：先把等待语义和标准化契约固定，再让后续任务把这些结果接到 preview / execute 链路中。
+
+## 任务 12 当前 Jira preview 与写回规则层
+
+任务 12 完成后，仓库第一次拥有了 `Artifact Linking` 阶段的 Jira 写回最小闭环：能从 canonical 输入生成可审批 preview，能把审批绑定到不可变 preview hash，能在真实写入前执行 requirement binding 强约束检查，并且能以 `prepared -> dispatched -> terminal` 的固定顺序表达 Jira 副作用账本。这个阶段仍然保持为“connector 纯映射 + workflow 纯规则”，不提前接入真实网络 I/O、持久化和 CLI 命令面。
+
+## 新增文件职责
+
+### `src/domain/schemas.ts`
+
+- 在既有 Jira draft/result 契约上补齐任务 12 所需字段，而不是另起一套平行对象。
+- `JiraWritebackDraftSchema` 现在显式承载 `target_ref`、`request_payload_hash`、`dedupe_scope`、`expected_target_version`，让 preview 不只是“给人看”的文案，也能稳定衔接 execute 输入和 ledger 记录。
+- `JiraWritebackResultSchema` 现在显式承载 `already_applied` 与 `external_request_id`，为幂等去重、恢复对账和“不要重复写”的判断提供统一输出面。
+- 同时补出 `RequirementReference`、`JiraWritebackDraft`、`JiraWritebackResult` 的 type export，避免 connector 与 workflow 再各自复制一份弱约束接口。
+
+### `src/infrastructure/connectors/jira/index.ts`
+
+- 在既有 Jira intake 只读映射之上，新增任务 12 的 Jira 写回纯映射能力。
+- `buildJiraWritebackPreviewDraft()` 负责把 issue、target、GitLab 产物、verification ref 和 requirement refs 收敛成统一 draft：生成 `rendered_preview`、脱敏 `request_payload`、`request_payload_hash`、`idempotency_key`、`dedupe_scope` 和稳定 `target_ref`。
+- comment 写回默认注入稳定 marker；field 写回沿用相同的 dedupe / hash 协议，但不伪装成 comment 专用语义。
+- `createJiraExecuteResult()` 与 `createJiraAlreadyAppliedResult()` 把正常执行结果与“查重发现已写入”的结果都折叠为统一 `JiraWritebackResult`，让 workflow 不需要理解 Jira 响应细节。
+
+### `src/workflow/jira-writeback.ts`
+
+- 提供任务 12 的 Jira writeback 纯规则层，是本轮最核心的新文件。
+- `createJiraWritebackPreviewState()` 负责刷新当前有效 preview：更新 `jira_writeback_draft_ref`、重算 `previewHash`、把 `Artifact Linking` 拉到 `output_ready`，并使旧的活跃审批失效。
+- `buildJiraWritebackApprovalRecord()` 把审批记录固定绑定到 `preview_ref + preview_hash`，体现“审批的是哪一个 preview 版本”。
+- `guardJiraWritebackRequirementBinding()` 把 requirement binding 强约束阻塞点明确放在真实 Jira execute 之前，而不是提前污染分析阶段。
+- `buildJiraWritebackPreparedEntry()`、`markJiraWritebackEntryDispatched()`、`finalizeJiraWritebackEntry()` 把 Jira 副作用账本顺序写成显式规则，避免调用方随手跳过 `prepared` 或倒置顺序。
+- `shouldSkipJiraWritebackExecution()` 把 dry-run 和已终态/已对账写入的去重规则收敛为统一判定，防止恢复和重复执行时盲目重发。
+
+### `src/workflow/index.ts`
+
+- 在既有 state machine 与 execution 外部输入规则之外，新增对 `jira-writeback.ts` 的公共导出。
+- 保持 workflow 层统一公共面，不让 app、CLI 或测试开始深引内部文件。
+
+### `tests/unit/jira-writeback/jira-writeback.spec.ts`
+
+- 任务 12 的核心单元测试。
+- 锁定六个最小闭环：preview draft 生成、requirement binding 强约束阻塞、preview 刷新与旧审批失效、approval preview 绑定、ledger 顺序、dry-run 与已写入去重边界。
+- 这组测试让任务 12 的行为有了独立落点，而不是把 Jira 写回规则零散塞进已有 workflow / domain 回归里。
+
+### `tests/unit/domain/contracts.spec.ts`
+
+- 在既有 domain 契约测试中补上 Jira writeback draft/result 的字段回归。
+- 它的职责不是复测业务逻辑，而是防止后续把 `target_ref`、`request_payload_hash`、`dedupe_scope`、`already_applied` 这些恢复与幂等关键字段悄悄删回“调用方自己算”的状态。
+
+## 任务 12 架构洞察
+
+- 任务 12 最关键的 owner 收敛，是把“怎么把 canonical 输入翻成 Jira preview / result”继续留在 connector，把“什么时候能写、审批绑定哪个 preview、ledger 应该按什么顺序演进”留在 workflow。这样任务 13 做 Feishu 时可以对称复用思路，而不会把 Jira 的外部系统细节反灌回 workflow。
+- preview 在这一步已经不只是展示文本，而是一个 execute 前的稳定中间产物：`rendered_preview` 给人审，`request_payload_hash` / `idempotency_key` / `dedupe_scope` 给机器去重和恢复。这能把“预览”“审批”“副作用账本”三条链真正绑到同一个对象上。
+- requirement binding 强约束检查被刻意放在 Jira execute 前，而不是前移到 `Requirement Synthesis` 或 `Execution`。这样既遵守需求文档里“允许分析继续推进”的策略，也确保强约束项目不会把 unresolved requirement 带进真实外部写回。
+- `already_applied` 被做成 `JiraWritebackResult` 的一等字段，而不是只靠调用方读日志猜测，是为了把“查重命中后不应重复写”表达成标准结果，而不是隐含分支。
+- 这轮仍然没有接真实 connector execute、ledger 落盘和 checkpoint 写入，是刻意保持小步闭环：先把 preview / approval / dedupe / ledger 语义冻结下来，后续再把这些纯规则接到 storage 与 CLI，用更少的返工完成真实写回链路。

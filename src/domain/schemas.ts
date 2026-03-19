@@ -270,9 +270,13 @@ export const JiraWritebackDraftSchema = z
     issue_key: NonEmptyStringSchema,
     target_type: JiraWritebackTargetTypeSchema,
     target_field_id_or_comment_mode: NonEmptyStringSchema,
+    target_ref: NonEmptyStringSchema,
     rendered_preview: NonEmptyStringSchema,
     request_payload: JsonValueSchema,
+    request_payload_hash: NonEmptyStringSchema,
     idempotency_key: NonEmptyStringSchema,
+    dedupe_scope: NonEmptyStringSchema,
+    expected_target_version: NonEmptyStringSchema.nullable(),
   })
   .strict();
 
@@ -313,6 +317,8 @@ export const JiraWritebackResultSchema = z
     target_ref: NonEmptyStringSchema,
     target_version: NonEmptyStringSchema,
     result_url: UrlSchema,
+    already_applied: z.boolean(),
+    external_request_id: NonEmptyStringSchema.nullable(),
     updated_at: TimestampSchema,
   })
   .strict();
@@ -600,6 +606,7 @@ export type StructuredError = z.infer<typeof StructuredErrorSchema>;
 export type JiraIssueSnapshot = z.infer<typeof JiraIssueSnapshotSchema>;
 export type JiraIssueRequirementHint = z.infer<typeof JiraIssueRequirementHintSchema>;
 export type JiraIssueWritebackTarget = z.infer<typeof JiraIssueWritebackTargetSchema>;
+export type RequirementReference = z.infer<typeof RequirementReferenceSchema>;
 export type RequirementCandidate = z.infer<typeof RequirementCandidateSchema>;
 export type JiraIntakeData = z.infer<typeof JiraIntakeDataSchema>;
 export type ProjectContextData = z.infer<typeof ProjectContextDataSchema>;
@@ -608,6 +615,8 @@ export type FixPlanningData = z.infer<typeof FixPlanningDataSchema>;
 export type GitLabArtifact = z.infer<typeof GitLabArtifactSchema>;
 export type VerificationCheck = z.infer<typeof VerificationCheckSchema>;
 export type VerificationResult = z.infer<typeof VerificationResultSchema>;
+export type JiraWritebackDraft = z.infer<typeof JiraWritebackDraftSchema>;
+export type JiraWritebackResult = z.infer<typeof JiraWritebackResultSchema>;
 export type RepoSelection = z.infer<typeof RepoSelectionSchema>;
 export type StageResultStatus = z.infer<typeof StageResultStatusSchema>;
 export type StageResult<T> = {

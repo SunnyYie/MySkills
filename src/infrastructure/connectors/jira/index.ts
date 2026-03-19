@@ -1,8 +1,17 @@
+import { createHash } from 'node:crypto';
+
 import {
   JiraIssueSnapshotSchema,
+  JiraWritebackDraftSchema,
+  JiraWritebackResultSchema,
   StructuredErrorSchema,
+  type GitLabArtifact,
   type JiraIssueSnapshot,
+  type JiraIssueWritebackTarget,
+  type JiraWritebackDraft,
+  type JiraWritebackResult,
   type ProjectProfile,
+  type RequirementReference,
   type StructuredError,
 } from '../../../domain/index.js';
 
@@ -60,7 +69,109 @@ const mapWritebackTarget = (target: string) =>
     : {
         target_type: 'field' as const,
         target_field_id_or_comment_mode: target.trim(),
-      };
+    };
+
+const stableStringify = (value: unknown): string => {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item)).join(',')}]`;
+  }
+
+  if (value && typeof value === 'object') {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, nestedValue]) => `${JSON.stringify(key)}:${stableStringify(nestedValue)}`)
+      .join(',')}}`;
+  }
+
+  return JSON.stringify(value);
+};
+
+const sha256 = (value: unknown) =>
+  `sha256:${createHash('sha256').update(stableStringify(value)).digest('hex')}`;
+
+const createTargetRef = ({
+  issueKey,
+  target,
+}: {
+  issueKey: string;
+  target: JiraIssueWritebackTarget;
+}) =>
+  target.target_type === 'comment'
+    ? `jira://${issueKey}/comment`
+    : `jira://${issueKey}/field/${target.target_field_id_or_comment_mode}`;
+
+const createDedupeScope = ({
+  issueKey,
+  target,
+}: {
+  issueKey: string;
+  target: JiraIssueWritebackTarget;
+}) =>
+  target.target_type === 'comment'
+    ? `jira:${issueKey}:comment`
+    : `jira:${issueKey}:field:${target.target_field_id_or_comment_mode}`;
+
+const createWritebackMarker = ({
+  issueKey,
+  gitlabArtifacts,
+}: {
+  issueKey: string;
+  gitlabArtifacts: GitLabArtifact[];
+}) => {
+  const primaryArtifact = gitlabArtifacts[0];
+  const artifactHint =
+    primaryArtifact?.artifact_type === 'commit'
+      ? primaryArtifact.commit_sha.slice(0, 12)
+      : primaryArtifact?.artifact_type === 'branch'
+        ? primaryArtifact.branch_name
+        : primaryArtifact?.mr_iid?.toString() ?? 'no-artifact';
+
+  return `bo-orchestrator:${issueKey}:${artifactHint}`;
+};
+
+const renderPreviewBody = ({
+  issueSnapshot,
+  gitlabArtifacts,
+  verificationResultsRef,
+  requirementRefs,
+  marker,
+}: {
+  issueSnapshot: JiraIssueSnapshot;
+  gitlabArtifacts: GitLabArtifact[];
+  verificationResultsRef: string | null;
+  requirementRefs: RequirementReference[];
+  marker: string;
+}) => {
+  const artifactLines =
+    gitlabArtifacts.length === 0
+      ? ['- GitLab artifacts: none recorded']
+      : gitlabArtifacts.map((artifact) => {
+          if (artifact.artifact_type === 'commit') {
+            return `- Commit: ${artifact.commit_sha} (${artifact.commit_url})`;
+          }
+
+          if (artifact.artifact_type === 'branch') {
+            return `- Branch: ${artifact.branch_name}`;
+          }
+
+          return `- Merge request: !${artifact.mr_iid} (${artifact.mr_url})`;
+        });
+  const requirementLine =
+    requirementRefs.find(
+      (reference) => reference.requirement_binding_status === 'resolved',
+    )?.requirement_ref ?? 'unresolved';
+
+  return [
+    `Bugfix orchestrator update for ${issueSnapshot.issue_key}`,
+    '',
+    `Summary: ${issueSnapshot.summary}`,
+    `Requirement: ${requirementLine}`,
+    ...artifactLines,
+    `Verification ref: ${verificationResultsRef ?? 'not-recorded'}`,
+    '',
+    `<!-- ${marker} -->`,
+  ].join('\n');
+};
 
 export const buildJiraIssueSnapshot = ({
   projectProfile,
@@ -102,6 +213,123 @@ export const buildJiraIssueSnapshot = ({
     writeback_targets: projectProfile.jira.writeback_targets.map(mapWritebackTarget),
   });
 };
+
+export const buildJiraWritebackPreviewDraft = ({
+  issueSnapshot,
+  target,
+  gitlabArtifacts,
+  verificationResultsRef,
+  requirementRefs,
+  generatedAt,
+}: {
+  issueSnapshot: JiraIssueSnapshot;
+  target: JiraIssueWritebackTarget;
+  gitlabArtifacts: GitLabArtifact[];
+  verificationResultsRef: string | null;
+  requirementRefs: RequirementReference[];
+  generatedAt: string;
+}): JiraWritebackDraft => {
+  const normalizedIssueSnapshot = JiraIssueSnapshotSchema.parse(issueSnapshot);
+  const marker = createWritebackMarker({
+    issueKey: normalizedIssueSnapshot.issue_key,
+    gitlabArtifacts,
+  });
+  const renderedPreview = renderPreviewBody({
+    issueSnapshot: normalizedIssueSnapshot,
+    gitlabArtifacts,
+    verificationResultsRef,
+    requirementRefs,
+    marker,
+  });
+  const targetRef = createTargetRef({
+    issueKey: normalizedIssueSnapshot.issue_key,
+    target,
+  });
+  const requestPayload =
+    target.target_type === 'comment'
+      ? {
+          body: renderedPreview,
+          marker,
+          generated_at: generatedAt,
+        }
+      : {
+          fields: {
+            [target.target_field_id_or_comment_mode]: renderedPreview,
+          },
+          marker,
+          generated_at: generatedAt,
+        };
+
+  return JiraWritebackDraftSchema.parse({
+    issue_key: normalizedIssueSnapshot.issue_key,
+    target_type: target.target_type,
+    target_field_id_or_comment_mode: target.target_field_id_or_comment_mode,
+    target_ref: targetRef,
+    rendered_preview: renderedPreview,
+    request_payload: requestPayload,
+    request_payload_hash: sha256(requestPayload),
+    idempotency_key: `${createDedupeScope({
+      issueKey: normalizedIssueSnapshot.issue_key,
+      target,
+    })}:${sha256(requestPayload).slice('sha256:'.length, 'sha256:'.length + 16)}`,
+    dedupe_scope: createDedupeScope({
+      issueKey: normalizedIssueSnapshot.issue_key,
+      target,
+    }),
+    expected_target_version: null,
+  });
+};
+
+const createJiraResultUrl = (issueKey: string) =>
+  `https://jira.example.com/browse/${issueKey}`;
+
+export const createJiraExecuteResult = ({
+  resultId,
+  targetRef,
+  targetVersion,
+  issueKey,
+  updatedAt,
+  externalRequestId,
+}: {
+  resultId: string;
+  targetRef: string;
+  targetVersion: string;
+  issueKey: string;
+  updatedAt: string;
+  externalRequestId: string | null;
+}): JiraWritebackResult =>
+  JiraWritebackResultSchema.parse({
+    result_id: resultId,
+    target_ref: targetRef,
+    target_version: targetVersion,
+    result_url: createJiraResultUrl(issueKey),
+    already_applied: false,
+    external_request_id: externalRequestId,
+    updated_at: updatedAt,
+  });
+
+export const createJiraAlreadyAppliedResult = ({
+  issueKey,
+  targetRef,
+  marker,
+  externalRequestId,
+  updatedAt,
+}: {
+  issueKey: string;
+  targetRef: string;
+  marker: string;
+  externalRequestId: string | null;
+  updatedAt: string;
+}): JiraWritebackResult =>
+  JiraWritebackResultSchema.parse({
+    result_id: `already-applied:${sha256(marker).slice('sha256:'.length, 'sha256:'.length + 12)}`,
+    target_ref: targetRef,
+    target_version: 'already_applied',
+    result_url: createJiraResultUrl(issueKey),
+    already_applied: true,
+    external_request_id: externalRequestId,
+    updated_at: updatedAt,
+  });
 
 export const createJiraPermissionDeniedError = ({
   issueKey,

@@ -31,6 +31,17 @@ const createCompleteDraft = () => ({
       },
     ],
     writeback_targets: ['comment'],
+    subtask: {
+      issue_type_id: '10002',
+      summary_template: '[{issue_key}] {summary}',
+    },
+    branch_binding: {
+      target_issue_source: 'subtask',
+      fallback_to_bug: true,
+    },
+    commit_binding: {
+      target_issue_source: 'subtask',
+    },
     credential_ref: 'cred:jira/project-a',
   },
   requirements: {
@@ -42,6 +53,9 @@ const createCompleteDraft = () => ({
     project_id: 'group/project-a',
     default_branch: 'main',
     branch_naming_rule: 'bugfix/{issue_key}',
+    branch_binding: {
+      input_mode: 'current_branch',
+    },
     credential_ref: 'cred:gitlab/project-a',
   },
   feishu: {
@@ -138,6 +152,113 @@ describe('config loader', () => {
         nextAction: 'Use bind feishu to补录该字段，然后重新执行 inspect config --project proj-a。',
       },
     ]);
+  });
+
+  it('requires Jira subtask and binding rules before the profile is considered ready for v2 writeback flows', async () => {
+    const fakeHome = await mkdtemp(path.join(tmpdir(), 'bfo-config-jira-v2-'));
+    const storedProfilePath = getProjectProfilePath('proj-a', fakeHome);
+    const draft = createCompleteDraft() as Record<string, unknown>;
+    const jira = draft.jira as Record<string, unknown>;
+    const subtask = jira.subtask as Record<string, unknown>;
+    const branchBinding = jira.branch_binding as Record<string, unknown>;
+    const commitBinding = jira.commit_binding as Record<string, unknown>;
+
+    delete subtask.issue_type_id;
+    delete branchBinding.target_issue_source;
+    delete commitBinding.target_issue_source;
+
+    await writeJsonAtomically(storedProfilePath, draft);
+
+    const inspection = await inspectStoredProjectProfile({
+      projectId: 'proj-a',
+      homeDir: fakeHome,
+    });
+
+    expect(inspection.ready).toBe(false);
+    expect(inspection.missingFields).toEqual([
+      'jira.subtask.issue_type_id',
+      'jira.branch_binding.target_issue_source',
+      'jira.commit_binding.target_issue_source',
+    ]);
+    expect(inspection.issues).toEqual(
+      expect.arrayContaining([
+        {
+          code: 'missing_field',
+          path: 'jira.subtask.issue_type_id',
+          message:
+            'jira.subtask.issue_type_id is required before the project profile can be used for workflow execution.',
+          nextAction: 'Use bind jira to补录该字段，然后重新执行 inspect config --project proj-a。',
+        },
+        {
+          code: 'missing_field',
+          path: 'jira.branch_binding.target_issue_source',
+          message:
+            'jira.branch_binding.target_issue_source is required before the project profile can be used for workflow execution.',
+          nextAction: 'Use bind jira to补录该字段，然后重新执行 inspect config --project proj-a。',
+        },
+        {
+          code: 'missing_field',
+          path: 'jira.commit_binding.target_issue_source',
+          message:
+            'jira.commit_binding.target_issue_source is required before the project profile can be used for workflow execution.',
+          nextAction: 'Use bind jira to补录该字段，然后重新执行 inspect config --project proj-a。',
+        },
+      ]),
+    );
+  });
+
+  it('requires the GitLab branch binding input mode so branch association can be collected consistently', async () => {
+    const fakeHome = await mkdtemp(path.join(tmpdir(), 'bfo-config-gitlab-v2-'));
+    const storedProfilePath = getProjectProfilePath('proj-a', fakeHome);
+    const draft = createCompleteDraft() as Record<string, unknown>;
+    const gitlab = draft.gitlab as Record<string, unknown>;
+    const branchBinding = gitlab.branch_binding as Record<string, unknown>;
+
+    delete branchBinding.input_mode;
+
+    await writeJsonAtomically(storedProfilePath, draft);
+
+    const inspection = await inspectStoredProjectProfile({
+      projectId: 'proj-a',
+      homeDir: fakeHome,
+    });
+
+    expect(inspection.ready).toBe(false);
+    expect(inspection.missingFields).toContain('gitlab.branch_binding.input_mode');
+    expect(inspection.issues).toContainEqual({
+      code: 'missing_field',
+      path: 'gitlab.branch_binding.input_mode',
+      message:
+        'gitlab.branch_binding.input_mode is required before the project profile can be used for workflow execution.',
+      nextAction: 'Use bind gitlab to补录该字段，然后重新执行 inspect config --project proj-a。',
+    });
+  });
+
+  it('rejects unsupported GitLab branch binding input modes during inspection', async () => {
+    const fakeHome = await mkdtemp(path.join(tmpdir(), 'bfo-config-gitlab-mode-'));
+    const storedProfilePath = getProjectProfilePath('proj-a', fakeHome);
+    const draft = createCompleteDraft() as Record<string, unknown>;
+    const gitlab = draft.gitlab as Record<string, unknown>;
+    gitlab.branch_binding = {
+      input_mode: 'derive_from_issue',
+    };
+
+    await writeJsonAtomically(storedProfilePath, draft);
+
+    const inspection = await inspectStoredProjectProfile({
+      projectId: 'proj-a',
+      homeDir: fakeHome,
+    });
+
+    expect(inspection.ready).toBe(false);
+    expect(inspection.issues).toContainEqual({
+      code: 'invalid_value',
+      path: 'gitlab.branch_binding.input_mode',
+      message:
+        'gitlab.branch_binding.input_mode is invalid: Invalid option: expected one of "current_branch"|"explicit"',
+      nextAction:
+        'Update gitlab.branch_binding.input_mode via bind gitlab and rerun inspect config --project proj-a。',
+    });
   });
 
   it('rejects unsupported config version formats before workflow startup', async () => {

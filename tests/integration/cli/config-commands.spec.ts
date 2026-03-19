@@ -5,7 +5,10 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { bootstrapCli } from '../../../src/app/index.js';
-import { getProjectProfilePath } from '../../../src/storage/index.js';
+import {
+  getProjectProfilePath,
+  writeJsonAtomically,
+} from '../../../src/storage/index.js';
 
 const createOutputCollector = () => {
   let stdout = '';
@@ -63,6 +66,17 @@ const createCompleteProfileSections = () => ({
       },
     ],
     writeback_targets: ['comment'],
+    subtask: {
+      issue_type_id: '10002',
+      summary_template: '[{issue_key}] {summary}',
+    },
+    branch_binding: {
+      target_issue_source: 'subtask',
+      fallback_to_bug: true,
+    },
+    commit_binding: {
+      target_issue_source: 'subtask',
+    },
     credential_ref: 'cred:jira/project-a',
   },
   requirements: {
@@ -74,6 +88,9 @@ const createCompleteProfileSections = () => ({
     project_id: 'group/project-a',
     default_branch: 'main',
     branch_naming_rule: 'bugfix/{issue_key}',
+    branch_binding: {
+      input_mode: 'current_branch',
+    },
     credential_ref: 'cred:gitlab/project-a',
   },
   feishu: {
@@ -291,5 +308,165 @@ describe('CLI config commands', () => {
       },
     });
     expect(beforeInspect).toBe(afterInspect);
+  });
+
+  it('rejects old-style Jira and GitLab payloads that are missing v2 binding rules', async () => {
+    const fakeHome = await mkdtemp(path.join(tmpdir(), 'bfo-cli-bind-v2-rules-'));
+    const fixtureDir = await mkdtemp(path.join(tmpdir(), 'bfo-cli-bind-v2-files-'));
+    const collector = createOutputCollector();
+    const program = bootstrapCli({
+      io: collector.io,
+      env: {
+        ...process.env,
+        BUGFIX_ORCHESTRATOR_HOME: fakeHome,
+      },
+    });
+
+    await expect(
+      program.parseAsync([
+        'node',
+        'bugfix-orchestrator',
+        'bind',
+        'jira',
+        '--project',
+        'proj-a',
+        '--file',
+        await writeJsonFixture(fixtureDir, 'jira-old.json', {
+          base_url: 'https://jira.example.com',
+          project_key: 'BUG',
+          issue_type_ids: ['10001'],
+          requirement_link_rules: [
+            {
+              source_type: 'issue_link',
+              priority: 1,
+              fallback_action: 'manual',
+            },
+          ],
+          writeback_targets: ['comment'],
+          credential_ref: 'cred:jira/project-a',
+        }),
+        '--json',
+      ]),
+    ).rejects.toThrow(/subtask|branch_binding|commit_binding/);
+
+    await expect(
+      program.parseAsync([
+        'node',
+        'bugfix-orchestrator',
+        'bind',
+        'gitlab',
+        '--project',
+        'proj-a',
+        '--file',
+        await writeJsonFixture(fixtureDir, 'gitlab-old.json', {
+          base_url: 'https://gitlab.example.com',
+          project_id: 'group/project-a',
+          default_branch: 'main',
+          branch_naming_rule: 'bugfix/{issue_key}',
+          credential_ref: 'cred:gitlab/project-a',
+        }),
+        '--json',
+      ]),
+    ).rejects.toThrow(/branch_binding/);
+  });
+
+  it('inspect config groups missing v2 fields by the bind command that owns them', async () => {
+    const fakeHome = await mkdtemp(path.join(tmpdir(), 'bfo-cli-inspect-v2-gaps-'));
+    const collector = createOutputCollector();
+    const program = bootstrapCli({
+      io: collector.io,
+      env: {
+        ...process.env,
+        BUGFIX_ORCHESTRATOR_HOME: fakeHome,
+      },
+    });
+    const storedProfilePath = getProjectProfilePath('proj-a', fakeHome);
+
+    await writeJsonAtomically(storedProfilePath, {
+      project_id: 'proj-a',
+      project_name: 'Project A',
+      config_version: '2026-03-19',
+      jira: {
+        base_url: 'https://jira.example.com',
+        project_key: 'BUG',
+        issue_type_ids: ['10001'],
+        requirement_link_rules: [
+          {
+            source_type: 'issue_link',
+            priority: 1,
+            fallback_action: 'manual',
+          },
+        ],
+        writeback_targets: ['comment'],
+        credential_ref: 'cred:jira/project-a',
+      },
+      requirements: {
+        source_type: 'feishu_doc',
+        source_ref: 'doc://feishu/project-a',
+      },
+      gitlab: {
+        base_url: 'https://gitlab.example.com',
+        project_id: 'group/project-a',
+        default_branch: 'main',
+        branch_naming_rule: 'bugfix/{issue_key}',
+        credential_ref: 'cred:gitlab/project-a',
+      },
+      feishu: {
+        space_id: 'space-1',
+        doc_id: 'doc-1',
+        block_path_or_anchor: 'root/bugs',
+        template_id: 'tpl-1',
+        template_version: 'v1',
+        credential_ref: 'cred:feishu/project-a',
+      },
+      repo: {
+        local_path: '/workspace/project-a',
+        module_rules: [{ module_id: 'api', path_pattern: 'src/api/**' }],
+      },
+      approval_policy: {
+        requirement_binding_required: true,
+      },
+      serialization_policy: {
+        persist_dry_run_previews: true,
+      },
+      sensitivity_policy: {
+        sensitive_field_paths: ['jira.credential_ref'],
+        prohibited_plaintext_fields: ['token'],
+      },
+    });
+
+    await program.parseAsync([
+      'node',
+      'bugfix-orchestrator',
+      'inspect',
+      'config',
+      '--project',
+      'proj-a',
+      '--json',
+    ]);
+    const configOutput = JSON.parse(collector.getStdout().trim().split('\n').at(-1) ?? '{}');
+
+    expect(configOutput).toMatchObject({
+      command: 'inspect config',
+      projectId: 'proj-a',
+      validation: {
+        ready: false,
+      },
+      guidance: [
+        {
+          command: 'bind jira',
+          missingFields: [
+            'jira.subtask.issue_type_id',
+            'jira.subtask.summary_template',
+            'jira.branch_binding.target_issue_source',
+            'jira.commit_binding.target_issue_source',
+          ],
+        },
+        {
+          command: 'bind gitlab',
+          missingFields: ['gitlab.branch_binding.input_mode'],
+        },
+      ],
+    });
   });
 });

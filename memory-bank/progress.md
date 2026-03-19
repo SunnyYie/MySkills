@@ -1,5 +1,70 @@
 # Progress
 
+## 2026-03-19 - v2 任务 1：扩展项目画像与配置检查，支持 Jira 子任务 / branch / commit 绑定规则
+
+### 本轮完成内容
+
+- 在 `src/domain/schemas.ts` 中扩展 `ProjectProfile.jira`，新增：
+  - `subtask.issue_type_id`、`subtask.summary_template` 作为子任务创建的最小必填字段
+  - `subtask.description_template` 作为可选补充字段
+  - `branch_binding.target_issue_source`、`commit_binding.target_issue_source` 作为 branch / commit 绑定的最小必填规则
+  - `branch_binding.fallback_to_bug`、`commit_binding.fallback_to_bug` 作为可选回退边界
+- 在 `src/domain/schemas.ts` 中扩展 `ProjectProfile.gitlab`，新增 `branch_binding.input_mode` 作为 branch 绑定输入模式的最小必填字段，并以 `validate_naming_rule` 保留可选校验开关；既有 `branch_naming_rule` 保持不变，继续承担命名规则职责。
+- 在 `src/skills/config-loader/index.ts` 中把上述新增字段纳入项目画像完整性检查、缺失字段提示与 section schema 校验；`bind jira` / `bind gitlab` 现在会拒绝缺少 v2 绑定规则的旧式 payload。
+- 在 `src/app/project-profile.ts` 中扩展 `inspect config` 输出，新增 `guidance` 分组，把缺失项按 `bind jira`、`bind gitlab` 等命令 owner 聚合，方便开发者按命令补录；同时把 `inspect connectors` 的 Jira / GitLab 就绪判断与新字段保持一致。
+- 在测试侧补齐任务 1 的红绿覆盖：
+  - `tests/unit/config/config-loader.spec.ts` 覆盖 Jira 子任务/branch/commit 规则、GitLab branch binding 输入模式、缺失字段、非法字段、旧配置兼容边界
+  - `tests/integration/cli/config-commands.spec.ts` 覆盖 `bind jira` / `bind gitlab` 对旧式 payload 的拒绝，以及 `inspect config` 对新增缺口的命令级提示
+- 在全量验证时发现 `tests/milestones/document-consistency.spec.ts` 仍读取旧的 `memory-bank/*.md` 路径；本轮按最小修复把它调整为优先读取 `memory-bank/features/v1/*.md`，旧路径兜底，避免文档目录迁移导致回归测试误报。
+
+### 依据
+
+- 用户指令：阅读所有 `memory-bank` 文档，继续执行 `memory-bank/features/v2/实施计划.md` 的任务 1；每完成一个步骤先测试，通过后再继续；验证完成后更新 `progress.md` 和 `architecture.md`，且在此之前不进入任务 2。
+- `memory-bank/features/v2/实施计划.md` 任务 1：
+  - 扩展 `ProjectProfile.jira` 的子任务创建、branch 绑定、commit 绑定最小配置字段
+  - 扩展 `ProjectProfile.gitlab` 的 branch 绑定输入模式，并保持与 `branch_naming_rule` 兼容
+  - 扩展 `bind jira`、`bind gitlab` 的配置写入与 schema 校验
+  - 扩展 `inspect config` 的完整性检查与缺失项提示逻辑
+- `memory-bank/features/v1/需求文档.md`：
+  - “项目关系绑定需求”要求项目画像作为唯一可信配置源，缺失关键信息时必须提示补录，不能静默猜测
+  - “CLI 需求”要求配置通过 CLI 显式维护和检查
+- `memory-bank/features/v1/技术方案.md`：
+  - `ProjectProfile` 作为运行期唯一可信配置来源，需可版本化、可校验完整性、支持凭证与规则隔离
+  - `CLI Layer` 只负责命令入口、参数校验和结果展示；配置语义仍应由 domain / config-loader 收敛
+
+### 验证记录
+
+1. 验证对象：任务 1 步骤 1 的 Jira 新字段与缺失检查
+   触发方式：先修改 `tests/unit/config/config-loader.spec.ts`，再运行 `npm run test:unit -- tests/unit/config/config-loader.spec.ts`
+   预期结果：在实现前暴露 `jira.subtask.*`、`jira.branch_binding.*`、`jira.commit_binding.*` 缺口；实现后相关断言通过
+   实际结果：通过；新增 Jira 配置规则被纳入 `ProjectProfile` 与 config inspection，unit 测试最终 69/69 通过
+
+2. 验证对象：任务 1 步骤 2-4 的 GitLab 新字段、`bind` 校验与 `inspect config` 提示
+   触发方式：先修改 `tests/unit/config/config-loader.spec.ts` 与 `tests/integration/cli/config-commands.spec.ts`，再运行 `npm run test:integration -- tests/integration/cli/config-commands.spec.ts`
+   预期结果：`gitlab.branch_binding.input_mode` 缺失或非法时被识别；`bind jira` / `bind gitlab` 拒绝旧式 payload；`inspect config` 能按命令 owner 提示新增字段缺口
+   实际结果：通过；CLI integration 共 9/9 通过，`guidance` 输出与缺失字段分组符合预期
+
+3. 验证对象：TypeScript 契约完整性
+   触发方式：运行 `npm run typecheck`
+   预期结果：新增 schema、CLI 输出与测试夹具在全仓库范围内类型一致
+   实际结果：通过；命令退出码为 0
+
+4. 验证对象：全量测试回归
+   触发方式：运行 `npm run test`
+   预期结果：unit / integration / acceptance / milestone 全部通过，且不再受旧文档路径影响
+   实际结果：通过；unit 69/69、integration 9/9、acceptance 7/7、milestones 3/3 全部通过
+
+5. 验证对象：构建入口
+   触发方式：运行 `npm run build`
+   预期结果：扩展后的 `ProjectProfile`、config-loader、CLI app 层和测试修复不影响构建
+   实际结果：通过；命令退出码为 0
+
+### 当前边界说明
+
+- 尚未开始 `memory-bank/features/v2/实施计划.md` 的任务 2；本轮只完成项目画像 schema、配置写入/校验、CLI 检查输出与相关测试，不涉及 `ExecutionContext`、artifact ref、side-effect ledger 或 workflow 新字段。
+- 当前 `ProjectProfile.jira` / `ProjectProfile.gitlab` 新增字段只表达“配置规则”，不提前实现真实 Jira 子任务创建、branch / commit 写回 payload、preview / execute、dedupe 或 reconcile。
+- `inspect config` 的 `guidance` 目前只做命令 owner 聚合，不承担自动修复或交互式补录能力，继续遵守 CLI-first、显式配置优先的边界。
+
 ## 2026-03-19 - 任务 1：初始化项目骨架与依赖约束
 
 ### 本轮完成内容

@@ -5,14 +5,41 @@ import { describe, expect, it } from 'vitest';
 
 const projectRoot = process.cwd();
 
-const readDoc = (relativePath: string) =>
-  readFile(path.join(projectRoot, relativePath), 'utf8');
+const readDoc = async (...relativePaths: string[]) => {
+  for (const relativePath of relativePaths) {
+    try {
+      return await readFile(path.join(projectRoot, relativePath), 'utf8');
+    } catch (error) {
+      if (
+        typeof error === 'object' &&
+        error !== null &&
+        'code' in error &&
+        error.code === 'ENOENT'
+      ) {
+        continue;
+      }
+
+      throw error;
+    }
+  }
+
+  throw new Error(`Document not found in any expected location: ${relativePaths.join(', ')}`);
+};
 
 describe('document consistency', () => {
   it('keeps canonical command groups and stage names aligned across需求文档、技术方案、实施计划', async () => {
-    const requirements = await readDoc('memory-bank/需求文档.md');
-    const technical = await readDoc('memory-bank/技术方案.md');
-    const plan = await readDoc('memory-bank/实施计划.md');
+    const requirements = await readDoc(
+      'memory-bank/features/v1/需求文档.md',
+      'memory-bank/需求文档.md',
+    );
+    const technical = await readDoc(
+      'memory-bank/features/v1/技术方案.md',
+      'memory-bank/技术方案.md',
+    );
+    const plan = await readDoc(
+      'memory-bank/features/v1/实施计划.md',
+      'memory-bank/实施计划.md',
+    );
 
     for (const commandGroup of ['bind', 'inspect', 'run', 'record']) {
       expect(requirements).toContain(`\`${commandGroup}\``);
@@ -37,9 +64,18 @@ describe('document consistency', () => {
   });
 
   it('keeps v1 non-goals and AGENTS safety rules aligned with the planning documents', async () => {
-    const requirements = await readDoc('memory-bank/需求文档.md');
-    const technical = await readDoc('memory-bank/技术方案.md');
-    const plan = await readDoc('memory-bank/实施计划.md');
+    const requirements = await readDoc(
+      'memory-bank/features/v1/需求文档.md',
+      'memory-bank/需求文档.md',
+    );
+    const technical = await readDoc(
+      'memory-bank/features/v1/技术方案.md',
+      'memory-bank/技术方案.md',
+    );
+    const plan = await readDoc(
+      'memory-bank/features/v1/实施计划.md',
+      'memory-bank/实施计划.md',
+    );
     const agents = await readDoc('AGENTS.md');
 
     expect(requirements).toContain('自动修改代码');

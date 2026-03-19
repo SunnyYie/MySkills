@@ -89,6 +89,25 @@ export const ProjectProfileSchema = z
         issue_type_ids: z.array(NonEmptyStringSchema).min(1),
         requirement_link_rules: z.array(RequirementLinkRuleSchema).min(1),
         writeback_targets: z.array(NonEmptyStringSchema).min(1),
+        subtask: z
+          .object({
+            issue_type_id: NonEmptyStringSchema,
+            summary_template: NonEmptyStringSchema,
+            description_template: NonEmptyStringSchema.optional(),
+          })
+          .strict(),
+        branch_binding: z
+          .object({
+            target_issue_source: z.enum(['bug', 'subtask']),
+            fallback_to_bug: z.boolean().optional(),
+          })
+          .strict(),
+        commit_binding: z
+          .object({
+            target_issue_source: z.enum(['bug', 'subtask']),
+            fallback_to_bug: z.boolean().optional(),
+          })
+          .strict(),
         credential_ref: NonEmptyStringSchema,
       })
       .strict(),
@@ -104,6 +123,12 @@ export const ProjectProfileSchema = z
         project_id: NonEmptyStringSchema,
         default_branch: NonEmptyStringSchema,
         branch_naming_rule: NonEmptyStringSchema,
+        branch_binding: z
+          .object({
+            input_mode: z.enum(['current_branch', 'explicit']),
+            validate_naming_rule: z.boolean().optional(),
+          })
+          .strict(),
         credential_ref: NonEmptyStringSchema,
       })
       .strict(),

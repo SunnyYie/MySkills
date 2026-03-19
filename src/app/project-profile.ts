@@ -28,6 +28,12 @@ type ConnectorHealth = {
   detail: string;
 };
 
+type InspectConfigGuidance = {
+  command: `bind ${ProjectProfileSectionName}`;
+  missingFields: string[];
+  issuePaths: string[];
+};
+
 const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
@@ -51,6 +57,75 @@ const getDraftValue = (draft: Record<string, unknown>, fieldPath: string) =>
 
     return current[segment];
   }, draft);
+
+const SECTION_COMMANDS: Record<ProjectProfileSectionName, InspectConfigGuidance['command']> = {
+  project: 'bind project',
+  jira: 'bind jira',
+  requirements: 'bind requirements',
+  gitlab: 'bind gitlab',
+  feishu: 'bind feishu',
+  repo: 'bind repo',
+};
+
+const getFieldSection = (fieldPath: string): ProjectProfileSectionName => {
+  const [head] = fieldPath.split('.');
+
+  switch (head) {
+    case 'project_name':
+    case 'config_version':
+    case 'approval_policy':
+    case 'serialization_policy':
+    case 'sensitivity_policy':
+    case 'project_id':
+      return 'project';
+    case 'jira':
+      return 'jira';
+    case 'requirements':
+      return 'requirements';
+    case 'gitlab':
+      return 'gitlab';
+    case 'feishu':
+      return 'feishu';
+    case 'repo':
+      return 'repo';
+    default:
+      return 'project';
+  }
+};
+
+const buildInspectConfigGuidance = (
+  inspection: ProjectProfileInspection,
+): InspectConfigGuidance[] => {
+  const orderedSections: ProjectProfileSectionName[] = [
+    'project',
+    'jira',
+    'requirements',
+    'gitlab',
+    'feishu',
+    'repo',
+  ];
+  const grouped = new Map<ProjectProfileSectionName, InspectConfigGuidance>();
+
+  for (const section of orderedSections) {
+    grouped.set(section, {
+      command: SECTION_COMMANDS[section],
+      missingFields: [],
+      issuePaths: [],
+    });
+  }
+
+  for (const fieldPath of inspection.missingFields) {
+    grouped.get(getFieldSection(fieldPath))?.missingFields.push(fieldPath);
+  }
+
+  for (const issue of inspection.issues) {
+    grouped.get(getFieldSection(issue.path))?.issuePaths.push(issue.path);
+  }
+
+  return orderedSections
+    .map((section) => grouped.get(section) as InspectConfigGuidance)
+    .filter((entry) => entry.missingFields.length > 0 || entry.issuePaths.length > 0);
+};
 
 const buildConnectorHealth = async (
   inspection: ProjectProfileInspection,
@@ -85,6 +160,10 @@ const buildConnectorHealth = async (
       'jira.issue_type_ids',
       'jira.requirement_link_rules',
       'jira.writeback_targets',
+      'jira.subtask.issue_type_id',
+      'jira.subtask.summary_template',
+      'jira.branch_binding.target_issue_source',
+      'jira.commit_binding.target_issue_source',
       'jira.credential_ref',
     ])
       ? {
@@ -112,6 +191,7 @@ const buildConnectorHealth = async (
       'gitlab.project_id',
       'gitlab.default_branch',
       'gitlab.branch_naming_rule',
+      'gitlab.branch_binding.input_mode',
       'gitlab.credential_ref',
     ])
       ? {
@@ -183,6 +263,7 @@ export const inspectProjectConfig = async ({
       missingFields: inspection.missingFields,
       issues: inspection.issues,
     },
+    guidance: buildInspectConfigGuidance(inspection),
   };
 };
 

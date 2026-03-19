@@ -34,6 +34,17 @@ const createProjectProfile = (
       },
     ],
     writeback_targets: ['comment'],
+    subtask: {
+      issue_type_id: '10002',
+      summary_template: '[{issue_key}] {summary}',
+    },
+    branch_binding: {
+      target_issue_source: 'subtask',
+      fallback_to_bug: true,
+    },
+    commit_binding: {
+      target_issue_source: 'subtask',
+    },
     credential_ref: 'cred:jira/project-a',
   },
   requirements: {
@@ -45,6 +56,9 @@ const createProjectProfile = (
     project_id: 'group/project-a',
     default_branch: 'main',
     branch_naming_rule: 'bugfix/{issue_key}',
+    branch_binding: {
+      input_mode: 'current_branch',
+    },
     credential_ref: 'cred:gitlab/project-a',
   },
   feishu: {

@@ -1,5 +1,73 @@
 # Architecture Notes
 
+## v2 任务 1 当前配置与检查层
+
+任务 1 完成后，`ProjectProfile` 不再只是 v1 的静态绑定集合，而是开始承载 Jira 子任务创建规则、branch / commit 绑定目标规则，以及 GitLab branch 绑定输入模式。这个阶段仍然严格停留在“配置表达与配置检查”层，不提前实现真实 workflow、artifact 或外部写回。
+
+## 新增/调整文件职责
+
+### `src/domain/schemas.ts`
+
+- 把 v2 任务 1 需要的最小配置字段收敛到 domain 层：
+  - `jira.subtask`
+  - `jira.branch_binding`
+  - `jira.commit_binding`
+  - `gitlab.branch_binding`
+- 用 nested object 明确“规则对象”和既有字段的 owner 边界，避免把 branch 命名规则、branch 输入方式、Jira 绑定目标这些概念揉进同一个扁平字段表。
+- 同时用 required / optional 的划分表达最小闭环：
+  - 必填字段只覆盖任务 1 真正要检查的输入
+  - 可选字段只表达未来 connector / workflow 会消费的补充策略，不在当前阶段偷跑执行语义
+
+### `src/skills/config-loader/index.ts`
+
+- 继续担任“项目画像完整性检查”的唯一入口，但现在会把 v2 任务 1 的新增字段一并纳入：
+  - required field 检查
+  - section schema 校验
+  - `bind jira` / `bind gitlab` 写入时的 payload 约束
+- 这层只回答“配置能不能用、缺什么、哪里不合法”，不决定 CLI 怎么提示，也不承担 workflow fallback。
+
+### `src/app/project-profile.ts`
+
+- 继续作为 CLI `bind` / `inspect` 与 config-loader 之间的应用装配层。
+- 新增 `guidance` 聚合，把 `inspect config` 的缺失项和问题路径按 `bind` 命令 owner 归类，让 CLI 输出更接近开发者真正的补录动作。
+- 把 `inspect connectors` 的 Jira / GitLab readiness 与新字段对齐，避免“config 检查说不完整，但 connector 健康仍显示 ready”的语义分叉。
+
+### `tests/unit/config/config-loader.spec.ts`
+
+- 锁定 v2 任务 1 的最小 schema 契约：
+  - Jira 子任务/branch/commit 规则缺失时必须显式报错
+  - GitLab branch binding 输入模式缺失或非法时必须显式报错
+  - 完整配置时仍能正常归一化并加载
+- 这组测试主要保护 config semantics，不直接测试 CLI 命令面。
+
+### `tests/integration/cli/config-commands.spec.ts`
+
+- 锁定 CLI 对 v2 新配置字段的暴露方式：
+  - `bind jira` / `bind gitlab` 会拒绝缺少新规则的旧式 payload
+  - `inspect config` 会输出面向 `bind` 命令的 `guidance`
+- 这组测试确保“domain / config-loader 的新规则”真正传递到了用户可见的 CLI 行为。
+
+### `tests/milestones/document-consistency.spec.ts`
+
+- 本轮没有改变它的断言目标，只修复文档读取入口，使其兼容当前 `memory-bank/features/v1/` 的文档布局。
+- 它的角色仍然是里程碑层的文档一致性守门员，而不是任务 1 的业务逻辑测试。
+
+## 任务 1 架构洞察
+
+- 任务 1 最关键的拆分是把“branch 怎么命名”和“branch 从哪里拿”分成两个独立职责：
+  - `gitlab.branch_naming_rule` 继续负责命名策略
+  - `gitlab.branch_binding.input_mode` 新增负责输入采集策略
+  这样后续 CLI `run bind-branch` 才不会把“当前分支 / 显式输入”与“命名约束”混成一个字段。
+
+- `jira.subtask`、`jira.branch_binding`、`jira.commit_binding` 采用分组对象，而不是继续扩展 `writeback_targets`，是为了让“普通 Jira 写回目标”和“v2 新增开发关联规则”保持语义隔离。后续任务 3/4 需要 preview / execute / dedupe 时，可以直接围绕这些对象扩展，而不用从通用 comment/field 目标里反推业务意图。
+
+- `guidance` 被放在 app 层而不是 config-loader 层，是为了保持 owner 清晰：
+  - domain/schema 决定字段长什么样
+  - config-loader 决定配置是否合法
+  - app/CLI 决定怎样把问题翻译成开发者下一步动作
+
+- 任务 1 依旧没有进入 workflow / side-effect 语义；这能保证任务 2 之后新增 `ExecutionContext`、artifact ref、ledger operation 时，是建立在稳定配置源之上，而不是一边发明运行时字段，一边回头修改配置模型。
+
 ## 任务 1 当前骨架
 
 本文件记录任务 1 完成后仓库中实现文件的职责，作为后续任务继续落地时的结构基线。当前内容只解释骨架，不提前定义任务 2 及之后的业务细节。

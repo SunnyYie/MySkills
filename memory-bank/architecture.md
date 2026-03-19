@@ -414,3 +414,53 @@
 - `project-context` 输出 `waiting` 而不是把多候选或缺少人工绑定都当成 `failed`，是为了贴合工作流里的“等待人工补录”语义；但 repo 路径打不开仍然是 `failed`，因为它表示项目画像或执行环境本身不可用，两者不应混为一类阻塞。
 - 模块候选解析采用“显式信号优先、自由文本兜底、无信号则保留 repo 级上下文”的策略，是为了在不静默猜测唯一模块的前提下，仍给后续 `Code Localization` 提供一个可继续收敛的起点。
 - 把 `StageResult` 先落到 domain 契约里，而不是只在任务 7 本地声明类型，能让后续 `Requirement Synthesis`、`Code Localization`、`Fix Planning` 复用同一种完成/等待/失败表达，减少每个 skill 各自发明返回结构的风险。
+
+## 任务 8 当前 Requirement Synthesis 与 brief 渲染层
+
+任务 8 完成后，仓库第一次拥有了可审批、可导出、可作为后续阶段输入依据的 `Requirement Brief`。这一层仍然只做“基于已解析上下文生成结构化 brief，并渲染成 CLI / Markdown 输出”，没有提前接入 artifact 持久化、审批记录写入或任务 9 的代码定位。
+
+## 新增文件职责
+
+### `src/domain/schemas.ts`
+
+- 在既有 `JiraIntakeStageResultSchema`、`ProjectContextStageResultSchema` 之后，新增 `RequirementSynthesisStageResultSchema` 与对应类型导出。
+- 让 `Requirement Synthesis` 继续复用统一 `StageResult<T>` 契约，而不是把 brief 生成结果放成特例对象。
+- 这样后续 workflow 接入 `Requirement Synthesis` 时，可以沿用前两阶段相同的 `completed / waiting / failed` 语义与 `source_refs`/`generated_at` 字段，不需要单独写一套适配。
+
+### `src/skills/requirement-summarizer/index.ts`
+
+- 提供任务 8 的核心技能 `synthesizeRequirementBrief()`。
+- 只消费 `ProjectProfile`、`JiraIssueSnapshot` 与 `ProjectContextData` 三类已结构化输入，继续遵守“skill 不直接做 I/O”的边界。
+- 负责把 issue 摘要、仓库/模块上下文、requirement 绑定状态、需求来源和 GitLab 目标整理成 `known_context`，并输出稳定的 `fix_goal`、`pending_questions` 和 `source_refs`。
+- 对 unresolved requirement 明确保留 `binding_reason`，并在项目策略要求最终绑定时输出 warning，而不是把约束藏在后续阶段里。
+
+### `src/skills/index.ts`
+
+- 继续作为 skills 层统一出口，并新增 `requirement-summarizer` 导出。
+- 保持后续 workflow、CLI 或测试引用 skills 时，仍能沿用统一导入面，而不是开始出现分散的深路径导入。
+
+### `src/renderers/requirement-brief.ts`
+
+- 提供 `renderRequirementBriefCli()` 与 `renderRequirementBriefMarkdown()`。
+- 统一承担 brief 展示逻辑，把“怎么给人看”从 skill 的业务推理里拆出来，符合技术方案里 renderer 独立负责展示的边界。
+- 两个 renderer 都依赖同一个 `RequirementBriefSchema` 做输入校验，减少“CLI 能显示但 Markdown 导出丢字段”的漂移风险。
+- CLI 版本面向终端阅读，Markdown 版本面向 artifact 导出，但两者都覆盖同一组业务字段：issue、project、关联需求、binding status、已知上下文、修复目标、待确认事项和 source refs。
+
+### `src/renderers/index.ts`
+
+- 不再是空导出，开始承担 renderer 公共出口职责。
+- 让后续 brief 导出、Bugfix Report 导出和 CLI 输出都可以通过同一公共面接入 renderer，而不需要知道具体文件布局。
+
+### `tests/unit/requirement-brief/requirement-brief.spec.ts`
+
+- 任务 8 的 Requirement Brief 单元测试。
+- 锁定三件事：resolved brief 的稳定生成、unresolved brief 的显示与待确认问题、CLI / Markdown 双渲染的业务信息一致性。
+- 通过先红后绿的方式证明这组测试覆盖的是新增能力，而不是对现有行为做“补一层绿灯”。
+
+## 任务 8 架构洞察
+
+- 任务 8 最重要的收敛，不是把 brief 渲染得多漂亮，而是先让 `Requirement Brief` 成为一个独立、稳定、可复用的中间产物。后续 `Code Localization`、`Fix Planning` 和报告导出，都应该读取这个中间层，而不是重新回头拼 issue 摘要和 requirement 状态。
+- `RequirementBrief` 的结构与 renderer 被刻意拆开，是为了保持“业务事实”和“展示形式”分离。这样以后即使 CLI、Markdown、JSON 三种展示方式继续扩展，也不会逼着 `requirement-summarizer` 了解终端格式或文档模板。
+- unresolved requirement 没有在任务 8 被当成失败直接拒绝，而是生成可继续流转的 brief，并把风险留在显式 warning 与 pending question 中。这与需求文档里“允许继续生成 brief，但必须保留 `binding_reason`”的策略一致，也避免把“需要人工补录”与“系统硬失败”混成一类。
+- `source_refs` 当前先作为逻辑引用面固定下来，而没有马上写成真实 artifact record，是一种刻意分层：任务 8 先证明 brief 本身可被引用，后续 workflow / storage 再决定它何时落盘、如何绑定审批和 checkpoint。
+- `fix_goal` 与 `known_context` 采用稳定模板式生成，而不是自由摘要，是为了把这个阶段维持在“结构化归纳”而非“开放式写作”。这能减少文案漂移，也让后续测试更容易锁定行为。

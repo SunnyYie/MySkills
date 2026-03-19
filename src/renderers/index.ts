@@ -1,1 +1,1 @@
-export {};
+export * from './requirement-brief.js';

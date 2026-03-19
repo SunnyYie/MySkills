@@ -533,6 +533,9 @@ export const JiraIntakeStageResultSchema = createStageResultSchema(JiraIntakeDat
 export const ProjectContextStageResultSchema = createStageResultSchema(
   ProjectContextDataSchema,
 );
+export const RequirementSynthesisStageResultSchema = createStageResultSchema(
+  RequirementBriefSchema,
+);
 
 export type ProjectProfile = z.infer<typeof ProjectProfileSchema>;
 export type ExecutionContext = z.infer<typeof ExecutionContextSchema>;
@@ -563,4 +566,7 @@ export type StageResult<T> = {
 export type JiraIntakeStageResult = z.infer<typeof JiraIntakeStageResultSchema>;
 export type ProjectContextStageResult = z.infer<
   typeof ProjectContextStageResultSchema
+>;
+export type RequirementSynthesisStageResult = z.infer<
+  typeof RequirementSynthesisStageResultSchema
 >;

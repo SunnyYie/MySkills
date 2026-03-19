@@ -367,3 +367,59 @@
 - 当前 Jira connector 仍然是“结构化映射层”，不直接发起真实 Jira 网络读取；真实 reader capability、认证和远端健康检查仍属于后续 infrastructure 任务。
 - 当前 requirement 绑定依赖 `JiraIssueSnapshot.requirement_hints` 这一已标准化输入；它刻意避免 skill 直接读取 Jira 原始字段，以保持 connector owner 清晰。
 - 当前模块候选收敛规则为“显式 `module:<id>` 标签优先，其次才是 summary/description/label 自由文本命中”；如果没有模块信号，会保留 repo 上下文并输出 warning，而不是静默猜测唯一模块。
+
+## 2026-03-19 - 任务 8：实现 `Requirement Synthesis` 与 brief 渲染
+
+### 本轮完成内容
+
+- 在 `src/domain/schemas.ts` 中新增 `RequirementSynthesisStageResultSchema` 与对应类型导出，让 `Requirement Synthesis` 与前两阶段一样遵守统一 `StageResult<T>` 契约，而不是由 renderer 或 workflow 临时拼接半结构化对象。
+- 在 `src/skills/requirement-summarizer/index.ts` 中实现 `synthesizeRequirementBrief()`：基于 `JiraIssueSnapshot`、`ProjectContextData` 和 `ProjectProfile` 生成结构化 `Requirement Brief`，固定 `known_context`、`fix_goal`、`pending_questions` 与 `source_refs` 的最小表达。
+- 在 `src/skills/requirement-summarizer/index.ts` 中显式处理 unresolved requirement：当 requirement 仍未绑定且项目策略要求最终绑定时，brief 会继续生成，但同时输出稳定 warning 与待确认问题，避免后续阶段误把 unresolved 状态当成可静默忽略。
+- 在 `src/renderers/requirement-brief.ts` 与 `src/renderers/index.ts` 中实现 brief 的 CLI / Markdown 双渲染，保证 `issue_key`、`project_id`、关联需求、已知上下文、修复目标、待确认事项和 `source_refs` 在两种展示渠道中的业务信息保持一致。
+- 在 `src/skills/index.ts` 中纳入 `requirement-summarizer` 公共导出，并新增 `tests/unit/requirement-brief/requirement-brief.spec.ts`，通过红绿测试锁定任务 8 的最小闭环。
+
+### 依据
+
+- 用户指令：阅读 `memory-bank` 全部文档后继续执行实施计划任务 8；每在验证测试结果之前不开始下一个任务；验证通过后更新 `progress.md` 与 `architecture.md`；在 worktree 代码测试通过后合并到 `main`。
+- `memory-bank/实施计划.md` 任务 8：要求实现 `Requirement Synthesis` 与 brief 渲染，覆盖最小字段、unresolved requirement 展示规则、CLI/Markdown 一致渲染，以及 brief 作为后续阶段输入依据的稳定表达。
+- `memory-bank/需求文档.md`：
+  - “需求文档生成需求”：`Requirement Brief` 至少包含 bug 摘要、关联需求、已知上下文、修复目标、待确认事项，且必须可在 CLI 展示、导出为 Markdown、作为后续输入依据。
+  - “Requirement Brief 最小字段集”：`issue_key`、`project_id`、`linked_requirement`、`requirement_binding_status`、`binding_reason`、`known_context`、`fix_goal`、`pending_questions`、`generated_at`、`source_refs`。
+  - “未绑定需求处理策略”：允许在 requirement 未绑定时继续生成 `Requirement Brief`，但必须显式标记 `unresolved` 并保留 `binding_reason`。
+- `memory-bank/技术方案.md`：
+  - “7.3 RequirementBrief”：要求同时支持 CLI 展示、Markdown 导出，并作为后续阶段输入依据。
+  - “10.2 requirement-summarizer”：`requirement-summarizer` 负责生成 `Requirement Brief`。
+  - “Renderers” 设计：渲染逻辑应独立于 skill，避免把 CLI / Markdown 展示混入业务推理。
+
+### 验证记录
+
+1. 验证对象：任务 8 红灯起点
+   触发方式：先运行 `npm run test:unit -- tests/unit/requirement-brief/requirement-brief.spec.ts`
+   预期结果：实现前因缺少 `requirement-summarizer` 模块而失败，而不是误绿
+   实际结果：通过；首轮失败准确暴露 `src/skills/requirement-summarizer/index.ts` 缺失，说明新增测试确实覆盖到了任务 8 的新能力面
+
+2. 验证对象：任务 8 Requirement Brief 单元闭环
+   触发方式：补实现后再次运行 `npm run test:unit -- tests/unit/requirement-brief/requirement-brief.spec.ts`
+   预期结果：resolved / unresolved brief 生成、待确认问题、warning 语义，以及 CLI / Markdown 渲染一致性全部通过
+   实际结果：通过；新增 3 项断言全部通过，确认 brief 结构和双渲染输出已稳定
+
+3. 验证对象：根级测试聚合入口
+   触发方式：运行 `npm test`
+   预期结果：任务 8 新增 unit 测试通过，任务 1-7 的既有 unit / integration / acceptance 回归继续通过
+   实际结果：通过；unit 共 35/35 通过，integration `config-commands` 2/2 通过，acceptance `task1-project-skeleton` 4/4 通过
+
+4. 验证对象：TypeScript 类型检查
+   触发方式：运行 `npm run typecheck`
+   预期结果：新增 stage result schema、summarizer、renderers 与测试夹具可通过类型检查
+   实际结果：通过；命令退出码为 0
+
+5. 验证对象：构建入口
+   触发方式：运行 `npm run build`
+   预期结果：新增 `src/skills/requirement-summarizer` 与 `src/renderers/requirement-brief.ts` 可正常编译到 `dist/`
+   实际结果：通过；命令退出码为 0
+
+### 当前边界说明
+
+- 尚未开始任务 9；当前只实现 `Requirement Brief` 的结构化生成与 CLI / Markdown 渲染，不实现代码搜索、候选文件定位、影响模块扩展分析或根因假设推断。
+- 当前 brief 的 `source_refs` 已作为后续 artifact / checkpoint 绑定的稳定输入面，但本轮没有提前把 brief 真正写入 run artifacts、审批记录或 checkpoint；这些物理绑定仍属于后续 workflow / storage 接入任务。
+- 当前 `fix_goal` 与 `known_context` 采用“结构化输入归纳 + 稳定模板表达”的方式生成，刻意避免引入自由发挥式总结或额外需求扩写。

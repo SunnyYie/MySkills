@@ -567,3 +567,79 @@
 - `pending_external_inputs` 被放进 fix plan，而不是等到 `Execution` 才临时推导，是为了让审批阶段就能看见“批准后还需要补什么”。这让 `Fix Planning` 和 `Execution` 之间的交接字段稳定下来，减少任务 11 再次扩张 plan 结构的压力。
 - `Fix Planning` 在定位未收敛时返回 `waiting`，而不是生成低可信度建议，是任务 9 与任务 10 之间最关键的接口纪律。只有当 `Code Localization` 已经给出足够收敛的代码目标时，修复计划才应该进入审批门。
 - 这轮没有改 `ExecutionContext` 的物理写入与 artifact 绑定方式，而只先冻结 `StageResult` 输出面，是一种刻意的小步推进：先把“计划应该长什么样”固定，再让后续 workflow / storage 决定“它何时落盘、如何进入当前有效态”。
+
+## 任务 11 当前 Execution 外部输入层
+
+任务 11 完成后，仓库第一次把 `Execution` 从“只是计划里的占位阶段”落成了可恢复、可等待、可接收外部补录的最小闭环。这个阶段仍然不自动改代码，也不生成 Jira / 飞书 preview，只负责等待外部修复结果、把验证结果与 GitLab 产物标准化，并保护当前有效态不被冲突补录污染。
+
+## 新增文件职责
+
+### `src/domain/enums.ts`
+
+- 在既有 stage / run / artifact 枚举之外，新增 `VERIFICATION_OUTCOMES`、`VERIFICATION_CHECK_STATUSES`、`VERIFICATION_INPUT_SOURCES`。
+- 这些枚举把“验证结果如何被表达”先固定到 domain 层，避免 workflow、skill、report 各自用自由文本表达 passed / failed / mixed 语义。
+
+### `src/domain/schemas.ts`
+
+- 在既有 `GitLabArtifactSchema` 之后，新增 `VerificationCheckSchema`、`VerificationResultSchema`、`VerificationRecordingStageResultSchema`。
+- `VerificationResultSchema` 只保留当前有效态真正需要消费的字段：`outcome`、`verification_summary`、`checks`、`input_source`、`recorded_at`。
+- 同时补出 `GitLabArtifact` type export，让 workflow 与 skill 可以共享同一份标准化产物类型，而不是自己再写平行接口。
+
+### `src/skills/verification-recorder/index.ts`
+
+- 提供任务 11 的验证结果标准化 skill `recordVerificationResult()`。
+- 它只消费外部补录后的结构化 checks，不做任何 I/O，也不写 workflow 状态。
+- 该文件的关键职责不是“保存原始测试报告”，而是把外部验证证据折叠成后续 `ExecutionContext`、报告和写回链路都能消费的稳定摘要。
+
+### `src/skills/gitlab-linker/index.ts`
+
+- 提供任务 11 需要的 GitLab 产物标准化入口 `normalizeGitLabArtifacts()`。
+- 目前只承接 commit / branch / MR 三类引用的裁剪、默认字段补齐与 schema 校验，不提前承担 Jira draft 生成。
+- 这让任务 11 先解决“外部补录的产物能不能被统一接住”，而把任务 12 再需要的 preview 组装留在后续链路。
+
+### `src/skills/index.ts`
+
+- 继续承担 skills 统一出口职责，并在任务 11 中新增 `verification-recorder` 与 `gitlab-linker` 导出。
+- 这样后续 workflow / app 接入 Execution 外部输入能力时，仍然可以通过统一 skills 入口装配，不会在任务 11 开始出现深路径分叉。
+
+### `src/workflow/execution.ts`
+
+- 提供任务 11 的 Execution 纯规则层：`getExecutionExternalInputState()` 与 `recordExecutionExternalInputs()`。
+- `getExecutionExternalInputState()` 把“缺 GitLab 产物”“缺验证结果”“两者都缺”的场景统一折叠为 `waiting_external_input` 判定和明确 `waitingReason`。
+- `recordExecutionExternalInputs()` 负责把已标准化的外部输入并回当前有效态，同时处理三类关键规则：
+  - 首次补录后若仍缺另一类输入，则继续等待
+  - 重复补录相同 GitLab 产物时去重，不重复污染当前态
+  - 冲突补录时返回 `state_conflict`，并保持原上下文不变
+
+### `src/workflow/index.ts`
+
+- 继续承担 workflow 公共出口职责，并把 Execution 外部输入规则公开给后续 app / CLI 层。
+- 这保持了 workflow 层“只暴露公共面，不让调用方深引内部文件”的纪律。
+
+### `tests/unit/verification-recorder/verification-recorder.spec.ts`
+
+- 任务 11 的验证结果标准化单元测试。
+- 锁定 `verification_summary` 的摘要规则、`input_source` / `recorded_at` 的保留，以及 `source_refs` 的透传。
+
+### `tests/unit/gitlab-linker/gitlab-linker.spec.ts`
+
+- 任务 11 的 GitLab 产物标准化单元测试。
+- 锁定 commit / branch / MR 三类输入的默认字段补齐、字符串裁剪与非法缺字段拒绝。
+
+### `tests/unit/execution/execution.spec.ts`
+
+- 任务 11 的 Execution 工作流规则单元测试。
+- 锁定等待外部输入三类场景、首次补录 / 重复补录合并，以及冲突补录拒绝后不破坏当前有效态。
+
+### `tests/unit/domain/contracts.spec.ts`
+
+- 在既有 domain 契约测试中补上验证结果标准化契约。
+- 作用仍然是锁定字段面，防止后续把 `verification_summary`、`input_source` 或 `recorded_at` 再次退化成调用方各自拼接的弱约束对象。
+
+## 任务 11 架构洞察
+
+- 任务 11 最重要的边界收敛，是把 `Execution` 定义成“等待和吸收外部结果的阶段”，而不是“自动改代码的阶段”。这样当前状态机已经能承接外部 coding agent 或人工修复结果，但不会在 v1 提前做出自动执行承诺。
+- 验证结果没有直接塞进 `ExecutionContext` 大对象，而是继续通过 `verification_results_ref` 挂接，是在延续任务 2/3 形成的物理边界纪律：当前有效态只保留摘要和 ref，长文本和原始正文留在 artifacts。
+- GitLab 产物标准化放在 skill 层、等待语义和合并保护放在 workflow 层，是这轮最关键的 owner 划分。前者解决“输入长什么样”，后者解决“当前 run 怎么吸收它”；两者拆开后，任务 12 再去生成 Jira preview 时就不需要重新定义 artifact 契约。
+- 冲突补录不是直接覆盖当前有效态，而是返回 `state_conflict` 并保持原上下文不变，这是为了符合需求文档里“失败后保留现场”和技术方案里“workflow 是唯一状态 owner”的原则。否则 `Execution` 会变成一个可以悄悄篡改有效产物的薄弱点。
+- 这轮故意没有把 `Execution` 接到真实 checkpoint 写入、CLI `record` 命令或 Jira/飞书链路，是刻意遵守实施计划的小步推进：先把等待语义和标准化契约固定，再让后续任务把这些结果接到 preview / execute 链路中。

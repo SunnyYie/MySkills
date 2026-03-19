@@ -16,6 +16,9 @@ import {
   SIDE_EFFECT_STATUSES,
   STAGE_RESULT_STATUSES,
   STAGE_STATUSES,
+  VERIFICATION_CHECK_STATUSES,
+  VERIFICATION_INPUT_SOURCES,
+  VERIFICATION_OUTCOMES,
 } from './enums.js';
 
 const NonEmptyStringSchema = z.string().trim().min(1);
@@ -34,6 +37,9 @@ const RunModeSchema = z.enum(RUN_MODES);
 const RequirementBindingStatusSchema = z.enum(REQUIREMENT_BINDING_STATUSES);
 const GitLabArtifactTypeSchema = z.enum(GITLAB_ARTIFACT_TYPES);
 const GitLabArtifactSourceSchema = z.enum(GITLAB_ARTIFACT_SOURCES);
+const VerificationOutcomeSchema = z.enum(VERIFICATION_OUTCOMES);
+const VerificationCheckStatusSchema = z.enum(VERIFICATION_CHECK_STATUSES);
+const VerificationInputSourceSchema = z.enum(VERIFICATION_INPUT_SOURCES);
 const JiraWritebackTargetTypeSchema = z.enum(JIRA_WRITEBACK_TARGET_TYPES);
 const FeishuWriteModeSchema = z.enum(FEISHU_WRITE_MODES);
 const SideEffectStatusSchema = z.enum(SIDE_EFFECT_STATUSES);
@@ -241,6 +247,23 @@ export const GitLabArtifactSchema = z.discriminatedUnion('artifact_type', [
     mr_url: UrlSchema,
   }).strict(),
 ]);
+
+export const VerificationCheckSchema = z
+  .object({
+    name: NonEmptyStringSchema,
+    status: VerificationCheckStatusSchema,
+  })
+  .strict();
+
+export const VerificationResultSchema = z
+  .object({
+    outcome: VerificationOutcomeSchema,
+    verification_summary: NonEmptyStringSchema,
+    checks: z.array(VerificationCheckSchema).min(1),
+    input_source: VerificationInputSourceSchema,
+    recorded_at: TimestampSchema,
+  })
+  .strict();
 
 export const JiraWritebackDraftSchema = z
   .object({
@@ -562,6 +585,9 @@ export const CodeLocalizationStageResultSchema = createStageResultSchema(
 export const FixPlanningStageResultSchema = createStageResultSchema(
   FixPlanningDataSchema,
 );
+export const VerificationRecordingStageResultSchema = createStageResultSchema(
+  VerificationResultSchema,
+);
 
 export type ProjectProfile = z.infer<typeof ProjectProfileSchema>;
 export type ExecutionContext = z.infer<typeof ExecutionContextSchema>;
@@ -579,6 +605,9 @@ export type JiraIntakeData = z.infer<typeof JiraIntakeDataSchema>;
 export type ProjectContextData = z.infer<typeof ProjectContextDataSchema>;
 export type CodeLocalizationData = z.infer<typeof CodeLocalizationDataSchema>;
 export type FixPlanningData = z.infer<typeof FixPlanningDataSchema>;
+export type GitLabArtifact = z.infer<typeof GitLabArtifactSchema>;
+export type VerificationCheck = z.infer<typeof VerificationCheckSchema>;
+export type VerificationResult = z.infer<typeof VerificationResultSchema>;
 export type RepoSelection = z.infer<typeof RepoSelectionSchema>;
 export type StageResultStatus = z.infer<typeof StageResultStatusSchema>;
 export type StageResult<T> = {
@@ -602,3 +631,6 @@ export type CodeLocalizationStageResult = z.infer<
   typeof CodeLocalizationStageResultSchema
 >;
 export type FixPlanningStageResult = z.infer<typeof FixPlanningStageResultSchema>;
+export type VerificationRecordingStageResult = z.infer<
+  typeof VerificationRecordingStageResultSchema
+>;

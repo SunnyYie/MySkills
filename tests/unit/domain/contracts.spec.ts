@@ -26,6 +26,8 @@ import {
   STAGE_STATUSES,
   SideEffectLedgerEntrySchema,
   StructuredErrorSchema,
+  VerificationResultSchema,
+  VerificationRecordingStageResultSchema,
 } from '../../../src/domain/index.js';
 
 describe('domain contracts', () => {
@@ -511,6 +513,53 @@ describe('domain contracts', () => {
         errors: [],
         waiting_for: null,
         source_refs: ['jira:BUG-123', 'brief:BUG-123', 'code-localization:BUG-123'],
+        generated_at: '2026-03-19T10:30:00.000Z',
+      }).success,
+    ).toBe(true);
+  });
+
+  it('defines normalized verification recording contracts for Execution handoff', () => {
+    expect(
+      VerificationResultSchema.safeParse({
+        outcome: 'passed',
+        verification_summary:
+          'Verification passed with 2/2 successful checks. Primary evidence: coupon regression.',
+        checks: [
+          {
+            name: 'coupon regression',
+            status: 'passed',
+          },
+          {
+            name: 'manual smoke test',
+            status: 'passed',
+          },
+        ],
+        input_source: 'manual_cli',
+        recorded_at: '2026-03-19T10:30:00.000Z',
+      }).success,
+    ).toBe(true);
+
+    expect(
+      VerificationRecordingStageResultSchema.safeParse({
+        status: 'completed',
+        summary: 'Recorded passed verification evidence for BUG-123.',
+        data: {
+          outcome: 'failed',
+          verification_summary:
+            'Verification failed with 1 failing check. Primary failure: coupon regression.',
+          checks: [
+            {
+              name: 'coupon regression',
+              status: 'failed',
+            },
+          ],
+          input_source: 'test_report',
+          recorded_at: '2026-03-19T10:30:00.000Z',
+        },
+        warnings: [],
+        errors: [],
+        waiting_for: null,
+        source_refs: ['artifact://verification/junit.xml'],
         generated_at: '2026-03-19T10:30:00.000Z',
       }).success,
     ).toBe(true);

@@ -541,3 +541,60 @@
 - 尚未开始任务 11；当前只实现 `Fix Planning` 所需的结构化计划生成与 waiting 语义，不实现 `Execution` 阶段的外部输入补录、验证结果标准化或 GitLab 产物录入。
 - 当前 `Fix Planning` 仍是纯 skill 输出，不提前把 fix plan 真正写入 run artifacts、审批记录或 checkpoint；这些物理绑定仍属于后续 workflow / storage 接入任务。
 - 当前 plan 内容刻意保持为稳定模板式归纳，依赖 `Requirement Brief` 与 `Code Localization` 已产出的结构化输入，不引入自由发挥式方案扩写或自动改代码承诺。
+
+## 2026-03-19 - 任务 11：实现 `Execution` 阶段的外部输入补录与标准化
+
+### 本轮完成内容
+
+- 在 `src/domain/enums.ts` 与 `src/domain/schemas.ts` 中新增任务 11 需要的验证结果契约：`VERIFICATION_OUTCOMES`、`VERIFICATION_CHECK_STATUSES`、`VERIFICATION_INPUT_SOURCES`、`VerificationCheckSchema`、`VerificationResultSchema`、`VerificationRecordingStageResultSchema`，把 `Execution` 阶段可落入当前有效态的验证摘要结构固定为 outcome、summary、checks、input source、recorded_at，而不是直接塞入大段原始文本。
+- 在 `src/skills/verification-recorder/index.ts` 中实现 `recordVerificationResult()`，把外部补录的 checks 折叠为稳定 `verification_summary`，同时保留 `source_refs`、`recorded_at` 与 `input_source`，满足任务 11 对验证结果标准化和摘要化的要求。
+- 在 `src/skills/gitlab-linker/index.ts` 中实现 `normalizeGitLabArtifacts()`，对 commit / branch / MR 三类 GitLab 产物做统一裁剪、默认值补齐和 schema 校验，确保后续 Jira / 飞书链路只消费标准化产物。
+- 在 `src/workflow/execution.ts` 中实现 `getExecutionExternalInputState()` 与 `recordExecutionExternalInputs()`：固定 `Execution` 在缺少 GitLab 产物、缺少验证结果、两者都缺失时的 `waiting_external_input` 语义；支持首次补录、重复补录去重、验证结果 ref 更新，以及冲突 GitLab 产物的拒绝与当前有效态保护。
+- 更新 `src/skills/index.ts`、`src/workflow/index.ts`、`tests/unit/domain/contracts.spec.ts`，并新增 `tests/unit/verification-recorder/verification-recorder.spec.ts`、`tests/unit/gitlab-linker/gitlab-linker.spec.ts`、`tests/unit/execution/execution.spec.ts`，用红绿测试把任务 11 的最小闭环锁定下来。
+
+### 依据
+
+- 用户指令：请阅读所有 `memory-bank` 文档，并继续执行实施计划的任务 11；每在验证测试结果之前，请勿开始下一个任务；测试验证通过后记录到 `progress.md`，补充 `architecture.md`，并且在此之前不要进行任务 12；在 worktree 代码测试通过后合并到 `main`。
+- `memory-bank/实施计划.md` 任务 11：要求实现 `Execution` 阶段的等待外部输入语义、v1 不自动改代码的边界、验证结果标准化、GitLab 产物标准化，以及补录后的继续执行 / 重复补录合并 / 非法输入拒绝规则。
+- `memory-bank/需求文档.md`：
+  - “Execution”：v1 只推进修复动作编排，不承诺自动改代码。
+  - “状态机要求”：等待 GitLab 产物、验证结果或其他外部输入时必须进入 `waiting_external_input`。
+  - “GitLab 产物契约要求”：commit / branch / MR 三类产物具备条件必填字段，且 `artifact_source` 必须区分系统生成与外部导入。
+  - “ExecutionContext 最小字段集” 与 “Bugfix Report 最小字段集”：运行态和报告必须能承接 `verification_results` 与 GitLab 产物。
+- `memory-bank/技术方案.md`：
+  - “9.1 主流程说明” 中的 `Execution`：只负责挂起等待外部修复动作、接收补录验证结果、接收 GitLab 产物、标准化外部输入。
+  - “10.2 各 Skill 职责”：`verification-recorder` 负责校验并标准化验证结果，`gitlab-linker` 负责校验并标准化 GitLab 产物引用。
+  - “8.6 / 8.8 状态流转与检查点策略”：补录阶段进入 `waiting_external_input`，恢复时继续等待，不重放副作用。
+
+### 验证记录
+
+1. 验证对象：任务 11 红灯起点
+   触发方式：先运行 `npm run test:unit -- tests/unit/verification-recorder/verification-recorder.spec.ts`、`npm run test:unit -- tests/unit/gitlab-linker/gitlab-linker.spec.ts`、`npm run test:unit -- tests/unit/execution/execution.spec.ts tests/unit/domain/contracts.spec.ts`
+   预期结果：实现前因缺少任务 11 的 domain 契约、skill 和 workflow 入口而失败，而不是误绿
+   实际结果：通过；首轮失败准确暴露 `VerificationResultSchema` / `VerificationRecordingStageResultSchema` 缺失，以及 `src/skills/verification-recorder/index.ts`、`src/skills/gitlab-linker/index.ts`、`src/workflow/execution.ts` 尚未实现
+
+2. 验证对象：任务 11 unit 红绿闭环
+   触发方式：补实现后再次运行 `npm run test:unit -- tests/unit/verification-recorder/verification-recorder.spec.ts`、`npm run test:unit -- tests/unit/gitlab-linker/gitlab-linker.spec.ts`、`npm run test:unit -- tests/unit/execution/execution.spec.ts tests/unit/domain/contracts.spec.ts`
+   预期结果：验证结果摘要、GitLab 产物标准化、Execution 等待语义、重复补录去重和冲突拒绝全部通过
+   实际结果：通过；新增 8 项断言全部通过，并确认 commit / branch / MR 三类产物标准化、`waiting_external_input` 三类缺口判断、验证 ref 更新与冲突补录保护均已稳定
+
+3. 验证对象：根级测试聚合入口
+   触发方式：运行 `npm test`
+   预期结果：任务 11 新增 unit 测试通过，任务 1-10 的既有 unit / integration / acceptance 回归继续通过
+   实际结果：通过；unit 共 51/51 通过，integration `config-commands` 2/2 通过，acceptance `task1-project-skeleton` 4/4 通过
+
+4. 验证对象：TypeScript 类型检查
+   触发方式：运行 `npm run typecheck`
+   预期结果：新增 verification / gitlab / execution 模块与导出入口可通过类型检查
+   实际结果：通过；命令退出码为 0。期间曾暴露 `GitLabArtifact` 未从 domain 导出的问题，补充 type export 后重新验证通过
+
+5. 验证对象：构建入口
+   触发方式：运行 `npm run build`
+   预期结果：新增 `src/skills/verification-recorder`、`src/skills/gitlab-linker`、`src/workflow/execution.ts` 与相关 domain 更新可正常编译到 `dist/`
+   实际结果：通过；命令退出码为 0
+
+### 当前边界说明
+
+- 尚未开始任务 12；当前只实现 `Execution` 阶段的等待外部输入、补录标准化与当前有效态保护，不生成 Jira preview、不执行 Jira 写回，也不进入 Feishu 写入链路。
+- 当前验证结果仍通过 `verification_results_ref` 挂到 `ExecutionContext` 当前有效态，原始外部正文和长输出继续遵循 artifact ref / redaction 边界，不直接内嵌到 `context.json`。
+- 当前 GitLab 产物标准化只覆盖任务 11 需要的 commit / branch / MR 引用校验与默认字段补齐，不提前实现 task 12 所需的 Jira draft 生成或更完整的 connector 预览职责。

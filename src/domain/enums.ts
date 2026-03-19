@@ -75,6 +75,16 @@ export const GITLAB_ARTIFACT_SOURCES = [
   'external_import',
 ] as const;
 
+export const VERIFICATION_OUTCOMES = ['passed', 'failed', 'mixed'] as const;
+
+export const VERIFICATION_CHECK_STATUSES = ['passed', 'failed'] as const;
+
+export const VERIFICATION_INPUT_SOURCES = [
+  'manual_cli',
+  'test_report',
+  'external_agent',
+] as const;
+
 export const JIRA_WRITEBACK_TARGET_TYPES = ['comment', 'field'] as const;
 
 export const FEISHU_WRITE_MODES = ['append', 'replace_block'] as const;

@@ -252,3 +252,60 @@
 - 尚未开始任务 6；当前只实现 app 层最小装配、run 初始化、恢复入口路由与错误映射，不实现 `config-loader`、项目画像读取校验、CLI 子命令注册或真实 workflow 执行器。
 - 当前 `initializeRun()` 只负责建立任务 5 所需的初始上下文与 checkpoint 基线，不提前写入审计事件、artifact 导出或副作用账本。
 - 当前 `restoreRun()` 只负责选择恢复 checkpoint、加载最新上下文并输出恢复策略结论；真正的 reconcile 执行、阶段重放和审批恢复仍属于后续任务。
+
+## 2026-03-19 - 任务 6：实现 `config-loader` 与项目画像校验链路
+
+### 本轮完成内容
+
+- 在 `src/skills/config-loader/index.ts` 中实现任务 6 的最小配置能力：按项目隔离读取 `ProjectProfile` 草稿、补齐 `project_id`、检测缺失字段、`config_version` 格式、显式引用合法性，并在完整配置时输出稳定排序后的标准化 `ProjectProfile`。
+- 在 `src/skills/config-loader/index.ts` 中补充分段写入能力 `upsertProjectProfileSection()`，让 `bind project|jira|requirements|gitlab|feishu|repo` 可以逐段维护项目画像，而不是要求一次性提供全量配置。
+- 在 `src/app/project-profile.ts` 中把 `bind` 与 `inspect` 相关能力收敛回 app 层，统一处理 JSON 文件读取、配置写入、完整性检查、关系预览和接入体检，继续保持 CLI 不直接碰 storage / skills 细节。
+- 在 `src/cli/bind/register.ts`、`src/cli/inspect/register.ts` 与 `src/cli/program.ts` 中注册任务 6 所需的最小命令面，支持 `bind project|jira|requirements|gitlab|feishu|repo --project <id> --file <path>` 以及 `inspect config|graph|connectors --project <id> [--json]`。
+- 在 `src/cli/program.ts` 中加入可注入 `io` 与 `BUGFIX_ORCHESTRATOR_HOME` 环境覆盖，使 CLI 集成测试可以在隔离 home 目录中验证配置读写而不污染真实用户目录。
+- 新增 `tests/unit/config/config-loader.spec.ts` 与 `tests/integration/cli/config-commands.spec.ts`，通过红绿测试锁定任务 6 的最小契约：完整配置标准化、缺失字段与非法引用提示、`bind` 只写配置不建 run、`inspect` 只读不改状态。
+
+### 依据
+
+- 用户指令：阅读 `memory-bank` 全部文档后继续执行实施计划任务 6；每在验证测试结果之前不开始下一个任务；验证通过后更新 `progress.md` 与 `architecture.md`；在此之前不进入任务 7，并在 worktree 测试通过后合并到 `main`。
+- `memory-bank/实施计划.md` 任务 6：要求实现 `config-loader`、项目画像校验链路，以及 CLI `bind` / `inspect` 的最小职责边界。
+- `memory-bank/需求文档.md`：
+  - “项目画像配置最小字段要求”：`ProjectProfile` 必须包含 Jira、requirements、GitLab、飞书、repo、approval/serialization/sensitivity policy 的最小字段。
+  - “CLI 需求”：`bind` 负责维护项目画像和系统关系，`inspect` 负责配置检查、关系预览和接入体检。
+  - “项目关系绑定需求”：缺失关键信息必须显式提示补录，不能静默猜测；不同项目之间的凭证引用、模板配置和需求规则必须可隔离。
+- `memory-bank/技术方案.md`：
+  - “7.1 ProjectProfile”：项目画像是运行期唯一可信配置来源，要求按项目独立存储、可版本化、可校验完整性、支持凭证引用隔离。
+  - “config-loader” 能力定义：负责校验并标准化已读取的 `ProjectProfile`。
+  - “CLI 设计” 中的 `bind` / `inspect`：固定命令分组与子命令集合。
+
+### 验证记录
+
+1. 验证对象：任务 6 `config-loader` 红绿测试闭环
+   触发方式：先运行 `npm run test:unit -- tests/unit/config/config-loader.spec.ts` 观察失败，再在实现后重复运行同一命令
+   预期结果：实现前因缺少 `src/skills/config-loader/index.ts` 和相关导出而失败，实现后任务 6 新增 4 项断言全部通过
+   实际结果：通过；首轮失败准确暴露 `inspectStoredProjectProfile` / `loadProjectProfile` 模块缺失，补实现并修正 `source_ref` 引用校验后，`tests/unit/config/config-loader.spec.ts` 4/4 通过
+
+2. 验证对象：任务 6 CLI `bind` / `inspect` 集成测试
+   触发方式：先运行 `npm run test:integration -- tests/integration/cli/config-commands.spec.ts` 观察失败，再在实现后重复运行同一命令
+   预期结果：实现前因 CLI 未注册 `bind` / `inspect` 子命令而失败，实现后 2 项集成断言全部通过
+   实际结果：通过；首轮失败准确暴露 `unknown option '--project'`，补齐命令注册、app 装配和输出注入后，`tests/integration/cli/config-commands.spec.ts` 2/2 通过
+
+3. 验证对象：根级测试聚合入口
+   触发方式：运行 `npm test`
+   预期结果：任务 6 新增 unit / integration 测试通过，任务 1-5 的既有测试继续通过
+   实际结果：通过；unit 共 25/25 通过，integration `config-commands` 2/2 通过，acceptance `task1-project-skeleton` 4/4 通过
+
+4. 验证对象：TypeScript 类型检查
+   触发方式：运行 `npm run typecheck`
+   预期结果：新增 `config-loader`、CLI 注册模块、app 配置装配与测试夹具可通过类型检查
+   实际结果：通过；命令退出码为 0
+
+5. 验证对象：构建入口
+   触发方式：运行 `npm run build`
+   预期结果：新增 `src/skills/config-loader`、`src/cli/bind`、`src/cli/inspect`、`src/app/project-profile.ts` 可被正常编译到 `dist/`
+   实际结果：通过；命令退出码为 0
+
+### 当前边界说明
+
+- 尚未开始任务 7；当前只实现项目画像加载/校验、分段绑定写入和 `inspect` 只读体检，不实现 Jira intake、需求线索提取、项目匹配或仓库模块解析。
+- 当前 `bind` 只接收显式 JSON 文件输入并维护项目画像草稿，不触发 run 创建、workflow 状态推进、preview 生成或任何外部副作用。
+- 当前 `inspect connectors` 只做本地配置完备性与 repo 路径可访问性检查，不调用 Jira / GitLab / 飞书真实接口，因此“ready” 表示配置就绪而非远端联通性已验证。

@@ -261,3 +261,77 @@
 - `use-cases.ts` 与 `run-lifecycle.ts` 分开，是为了把“命令边界”与“运行态装配”拆开。前者是静态映射契约，后者是有 I/O、有状态文件读写和恢复判定的用例逻辑；分开后任务 15 做命令面时更容易保持 CLI 只做参数适配。
 - `restoreRun()` 没有直接把 reconcile、阶段执行或审批恢复做掉，而是只输出恢复策略结论。这延续了任务 4 的边界：workflow 定义规则，app 负责路由和装配，真正执行哪个阶段仍留给后续任务。
 - 错误映射集中在 app 层而不是 CLI 层，是因为 app 更接近 domain/storage/workflow 三方交汇处，能在不泄漏底层细节的前提下统一用户可见结果；这样以后 CLI 的 TTY/JSON 两种输出模式可以共享同一份失败语义。
+
+## 任务 6 当前配置加载与 CLI 绑定层
+
+任务 6 完成后，项目画像不再只是 domain schema 里的静态定义，而是开始拥有“如何从本地读取、如何判断是否可运行、如何逐段补录、如何通过 CLI 只读体检暴露给用户”的最小实现。这个阶段仍然不进入 Jira intake 或真实 connector 调用，只把配置链路打通。
+
+## 新增文件职责
+
+### `src/skills/config-loader/index.ts`
+
+- 提供任务 6 的配置技能入口，负责读取项目隔离的 profile 草稿、统一字符串 trim、检查最小字段完整性、`config_version` 格式和显式引用合法性。
+- 在配置完整时输出排序稳定的标准化 `ProjectProfile`，确保后续 `jira-intake`、`project-context` 等技能消费到的是确定性顺序的规则集合，而不是“同样内容但数组顺序漂移”的对象。
+- 提供 `inspectStoredProjectProfile()` 与 `loadProjectProfile()` 两个层次的接口：前者允许 `inspect` 面向不完整草稿输出缺失项，后者只在配置完整时向后续主流程暴露可信配置。
+- 提供 `upsertProjectProfileSection()`，把 `bind project|jira|requirements|gitlab|feishu|repo` 的逐段写入统一收敛到技能层，而不是让 CLI 或 app 自己拼路径、自己 merge JSON。
+- 通过 `ProjectProfileValidationError` 保留一份结构化检查结果，让上层可以区分“文件不存在 / 配置不完整 / 字段值非法”而不是只得到一个模糊异常字符串。
+
+### `src/app/project-profile.ts`
+
+- 作为任务 6 中 `bind` / `inspect` 的 app 装配入口。
+- `bindProjectProfileSectionFromFile()` 负责读取命令传入的 JSON 文件、调用 `config-loader` 写入对应 section，并把检查结果整理成 CLI 可直接消费的输出对象。
+- `inspectProjectConfig()`、`inspectProjectGraph()`、`inspectProjectConnectors()` 负责把同一份配置草稿转换成三类只读视图：完整性检查、关系预览和接入体检。
+- 在 repo 体检里只检查本地路径是否可访问，而不越界执行 git 或远端 connector 动作，继续保持任务 6 的“配置层”边界。
+
+### `src/cli/bind/register.ts`
+
+- 注册 `bind` 命令组下的六个子命令：`project`、`jira`、`requirements`、`gitlab`、`feishu`、`repo`。
+- 统一要求 `--project <id>` 与 `--file <path>`，把“显式维护绑定信息”这条需求落实为文件驱动的配置写入，而不是在 CLI 中混入运行态逻辑。
+- 通过 `--json` 支持后续非交互模式，也让当前集成测试可以稳定断言输出。
+
+### `src/cli/inspect/register.ts`
+
+- 注册 `inspect config|graph|connectors` 三个任务 6 所需的最小子命令。
+- 保持所有 inspect 子命令只做只读检查，不写 run 状态、不刷新 preview、不补录外部信息。
+- 把输出形态保持成稳定结构对象，便于后续任务 15 再叠加 TTY 渲染，而不是现在就把人类可读文本和业务判断耦合死。
+
+### `src/cli/program.ts`
+
+- 从“只有程序名和帮助信息”的骨架，升级为任务 6 的最小命令注册中心。
+- 新增 `CliRuntimeOptions` 和可注入的 `io` / `env`，把 CLI 输出和 home 目录选择从 `process.*` 直接读取中抽离出来，方便测试与后续非交互模式扩展。
+- 通过 `BUGFIX_ORCHESTRATOR_HOME` 环境覆盖，把任务 6 的集成测试隔离到临时 home 目录，避免污染真实配置目录。
+
+### `src/app/bootstrap.ts`
+
+- 继续作为 CLI 装配入口，但现在支持把 runtime 选项透传给 `createProgram()`。
+- 保持 `src/cli/bin.ts` 仍只关心“启动 CLI”，而不需要知道测试注入、home 覆盖或命令注册细节。
+
+### `src/app/index.ts`
+
+- 继续作为 app 层公共导出面，并新增导出项目画像相关 use case。
+- 让 CLI 和测试都通过 app 公共面消费任务 6 能力，避免后续直接跨目录访问 `src/skills/config-loader` 内部实现。
+
+### `src/skills/index.ts`
+
+- 不再只是空锚点，开始把 `config-loader` 暴露为 skills 层的一部分。
+- 保持未来 skills 扩展时仍有统一出口，而不是每个技能各自散落导入路径。
+
+### `tests/unit/config/config-loader.spec.ts`
+
+- 任务 6 的 config-loader 单元测试。
+- 锁定四类最小契约：完整配置的标准化、缺失字段提示、非法版本拦截、非法引用与 repo 路径拒绝。
+- 这组测试的重点是保证“进入主流程之前就能发现配置问题”，而不是覆盖 CLI 行为。
+
+### `tests/integration/cli/config-commands.spec.ts`
+
+- 任务 6 的 CLI 集成测试。
+- 验证 `bind` 只写项目画像、不创建 run 目录；`inspect` 只读输出、不回写配置；`graph` / `connectors` 的返回结构能被稳定消费。
+- 通过注入临时 home 目录覆盖真实配置路径，保证测试能真实经过 CLI -> app -> skills -> storage 的链路，而不会污染开发机状态。
+
+## 任务 6 架构洞察
+
+- 任务 6 最关键的收敛点，是把“项目画像可以不完整地被维护”与“只有完整配置才能进入主流程”分开。`inspectStoredProjectProfile()` 负责前者，`loadProjectProfile()` 负责后者，这样 `bind` 才能支持逐段补录，而 `run` 未来仍能拿到唯一可信配置来源。
+- `config-loader` 放在 `src/skills` 而不是 `src/app`，是因为“校验并标准化配置对象”本质上是一个可复用、无业务副作用的能力；app 只负责把这个能力接到 CLI 用例上。这样后续别的入口如果要消费配置，也能直接复用技能层而不绕回命令面。
+- `bind` 没有直接要求一次性写入整份 `ProjectProfile`，而是支持 section 级维护，是为了贴合需求文档里“配置缺失必须支持补录”的节奏；否则用户只能手工编辑完整 JSON，CLI 的绑定价值会被削弱。
+- `inspect connectors` 目前只做到“配置就绪”和“本地 repo 路径可访问”两个层次，没有冒进做远端连通性探测，是刻意遵守任务 6 边界。真正的 Jira / GitLab / 飞书接口体检应该留在 connector 层和更后面的任务里。
+- 在 `createProgram()` 里引入可注入 `io` / `env`，看起来像测试细节，实际是在为后续任务 15 的 TTY/JSON 双输出、非交互模式和更稳定的 CLI 集成测试提前埋接缝；这能减少以后再回头重拆 `process.stdout` / `process.env` 的成本。

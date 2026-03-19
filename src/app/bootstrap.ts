@@ -1,5 +1,7 @@
-import { createProgram } from "../cli/program.js";
+import { createProgram } from '../cli/program.js';
 
-export function bootstrapCli() {
-  return createProgram();
+type BootstrapCliOptions = Parameters<typeof createProgram>[0];
+
+export function bootstrapCli(options?: BootstrapCliOptions) {
+  return createProgram(options);
 }

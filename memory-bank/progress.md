@@ -710,3 +710,57 @@
 - 尚未开始任务 14；当前只实现 Feishu preview / append execute 链路的纯契约与纯规则层，不进入 `report-writer` 与统一导出。
 - 当前 Feishu 写入仍停留在 connector 纯映射与 workflow 纯规则层：不发真实网络请求、不写 `side-effects.ndjson`、不接 checkpoint 持久化，也不注册 CLI 的 preview / execute 子命令。
 - 当前 preview draft 中保留的是审批和 execute 输入对齐所需的脱敏 payload；真正“默认不落原始 request_payload、只落 hash 与 preview”的 storage 策略，以及失败现场与 checkpoint 的物理绑定，仍由后续持久化接线任务承接。
+
+## 2026-03-19 - 任务 14：实现 `report-writer` 与统一导出
+
+### 本轮完成内容
+
+- 新增 `src/skills/report-writer/index.ts`，实现任务 14 的统一报告组装能力 `createBugfixReport()`：从最终 `ExecutionContext`、审批历史和外部结果摘要生成标准 `BugfixReport`，统一收敛 `requirement_refs`、`code_locations`、`artifacts`、`approval_history`、`open_risks`、`failure_summary` 等最终输出字段，不再要求调用方自己去拼中间工件。
+- 新增 `src/renderers/report.ts`，提供 `renderBugfixReportCli()`、`renderBugfixReportMarkdown()`、`renderBugfixReportJson()` 三种导出方式，三者统一消费同一份 `BugfixReport` 事实源，满足 CLI 查看、结构化 JSON 导出和 Markdown 沉淀三类输出要求。
+- 更新 `src/skills/index.ts` 与 `src/renderers/index.ts`，把 `report-writer` 与报告渲染能力纳入公共导出面，避免后续 app / CLI /测试深引内部路径。
+- 新增 `tests/unit/report/report-writer.spec.ts`，通过红绿测试锁定三类能力：成功 run 的最终报告组装、`partial_success` / `failed` 的差异化 failure summary，以及 CLI / Markdown / JSON 三种输出对同一报告字段的映射一致性。
+
+### 依据
+
+- 用户指令：阅读所有 `memory-bank` 文档并继续执行实施计划任务 14；每在验证测试结果之前不得开始下一个任务；测试验证通过后更新 `progress.md`，补充 `architecture.md` 中的架构洞察与文件职责说明；在此之前不进入任务 15；在 worktree 代码测试通过后合并到 `main`。
+- `memory-bank/实施计划.md` 任务 14：要求实现统一 `Bugfix Report`，覆盖最小字段集、success / partial_success / failed / cancelled 等结果表达、多种导出方式映射，以及审批历史、外部结果、开放风险和 failure summary 的归档规则。
+- `memory-bank/需求文档.md`：
+  - “输出与报告需求”：`Bugfix Report` 必须成为整个流程的统一输出，至少包含报告标识、bug 基本信息、关联需求、代码定位、修复方案摘要、验证结果、GitLab 链接、Jira 回写摘要、飞书记录摘要、审批历史、开放风险和最终状态。
+  - “安全与凭证需求”：`Bugfix Report` 必须支持 redaction，因此报告层应继续只汇总 ref、摘要和结构化事实，而不反向塞回高敏感原始正文。
+- `memory-bank/技术方案.md`：
+  - “7.4 BugfixReport”：报告字段必须与既有 domain 契约一致。
+  - “10 Skill 设计 / report-writer”：`report-writer` 的 owner 是“基于最终上下文输出 `Bugfix Report`”。
+  - “11.1.1 owner 约束”：Renderers 只负责把 preview 或结果对象格式化成 CLI / Markdown / JSON，因此多渠道导出应共享同一报告事实来源，而不是各写各的拼装逻辑。
+
+### 验证记录
+
+1. 验证对象：任务 14 红灯起点
+   触发方式：先运行 `npm run test:unit -- tests/unit/report/report-writer.spec.ts`
+   预期结果：实现前因缺少 `createBugfixReport()` 与报告渲染导出而失败，而不是误绿
+   实际结果：通过；首轮失败准确暴露 `createBugfixReport` 不存在，说明任务 14 的测试确实先锁定了新增能力缺口
+
+2. 验证对象：任务 14 unit 红绿闭环
+   触发方式：补实现后再次运行 `npm run test:unit -- tests/unit/report/report-writer.spec.ts`
+   预期结果：成功 run 报告、`partial_success` / `failed` 差异化 summary，以及 CLI / Markdown / JSON 导出一致性全部通过
+   实际结果：通过；`tests/unit/report/report-writer.spec.ts` 3 项断言全部通过
+
+3. 验证对象：根级测试聚合入口
+   触发方式：运行 `npm test`
+   预期结果：任务 14 新增 unit 测试通过，任务 1-13 的既有 unit / integration / acceptance 回归继续通过
+   实际结果：通过；unit 共 66/66 通过，integration `config-commands` 2/2 通过，acceptance `task1-project-skeleton` 4/4 通过
+
+4. 验证对象：TypeScript 类型检查
+   触发方式：运行 `npm run typecheck`
+   预期结果：新增 `report-writer`、报告 renderers 与测试夹具均可通过类型检查
+   实际结果：通过；首次验证暴露新测试夹具把 `GitLabArtifact` 可选字段误写成 `null`，按既有 domain 契约修正为可选缺省后重新验证通过，命令退出码为 0
+
+5. 验证对象：构建入口
+   触发方式：运行 `npm run build`
+   预期结果：新增 `src/skills/report-writer/index.ts` 与 `src/renderers/report.ts` 可正常编译到 `dist/`
+   实际结果：通过；命令退出码为 0
+
+### 当前边界说明
+
+- 尚未开始任务 15；当前只补齐统一 `Bugfix Report` 组装与导出能力，不进入 CLI 命令树扩展、`run` / `record` 子工作流注册或真实命令接线。
+- 当前 `report-writer` 继续建立在“最终上下文 + 摘要 + ref”的事实源之上：不会回退到直接嵌入 Jira/Feishu 原始 payload、完整 checkpoint 历史或错误长正文，保持与需求文档、技术方案一致的 redaction / storage 边界。
+- 当前导出层只提供纯 renderer，不承担状态查询、文件落盘或命令交互；真正把报告挂接到 CLI 命令面仍属于任务 15 的范围。

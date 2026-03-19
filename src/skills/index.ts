@@ -4,5 +4,6 @@ export * from './fix-planner/index.js';
 export * from './gitlab-linker/index.js';
 export * from './jira-intake/index.js';
 export * from './project-context/index.js';
+export * from './report-writer/index.js';
 export * from './requirement-summarizer/index.js';
 export * from './verification-recorder/index.js';

@@ -753,3 +753,48 @@
 - Feishu preview 里显式携带“未绑定需求”不是展示细节，而是策略落点：弱约束项目允许继续写，但必须把未绑定事实写进知识沉淀物本身。把这件事放在 connector 生成 preview 时完成，能避免 CLI、renderer 或未来真实 execute 入口各自补文案导致漂移。
 - `target_ref` 和 `dedupe_scope` 被提升为 Feishu draft 的必填字段后，Feishu 的 preview / approval / execute / reconcile 终于和 Jira 使用同一套中间态模型。这意味着后续 task 14 的 report 和更后面的 storage/CLI 接线可以按统一方式消费“外部写回草稿”和“外部写回结果”。
 - 本轮仍然没有接真实飞书 API、checkpoint 或 side-effects 落盘，是刻意保持小步闭环：先把 append 语义、审批绑定和去重规则冻结，再把这些纯规则接到真实 I/O；这样能在进入任务 14 前先确保 Feishu 链路的架构边界已经稳定。
+
+## 任务 14 当前统一报告与导出层
+
+任务 14 完成后，仓库第一次拥有了面向“整个 run 最终结果”的统一输出面。`BugfixReport` 不再只是 domain 里的静态 schema，而是有了明确的 skill owner 和 renderer owner：skill 负责把最终 `ExecutionContext`、审批历史和外部结果摘要收敛成一份标准报告；renderer 负责把这份报告映射到 CLI、Markdown、JSON 三种输出，而不是各处重复拼装摘要。
+
+## 新增文件职责
+
+### `src/skills/report-writer/index.ts`
+
+- 这是任务 14 新增的报告组装 skill，也是本轮最核心的新文件。
+- `createBugfixReport()` 负责从最终 `ExecutionContext`、审批历史、验证摘要、开放风险和外部结果摘要中，生成标准 `BugfixReport`。
+- 该文件把“哪些字段来自当前有效态、哪些字段要被压平成最终摘要、哪些失败语义要在 `failure_summary` 中显式表达”集中到一个地方，避免 app / CLI / renderer 各自写一套报告拼装逻辑。
+- `jira_writeback_summary`、`feishu_record_summary`、`external_outcomes` 和 `failure_summary` 都在这里按最终 run 状态做统一归约，因此 success、partial_success、failed、cancelled 的差异语义不会漂移到下游展示层。
+- 该 skill 继续遵守前面任务建立的边界：消费的是 ref、摘要和结构化对象，而不是重新内嵌高敏感原始 payload、checkpoint 历史或错误长正文。
+
+### `src/skills/index.ts`
+
+- 在既有 skill 公共面中新增 `report-writer` 导出。
+- 保持 skill 层统一入口，让后续 app / CLI 按同一模式消费 report writer，而不需要深引内部实现路径。
+
+### `src/renderers/report.ts`
+
+- 这是任务 14 新增的统一报告 renderer。
+- `renderBugfixReportCli()` 负责把 `BugfixReport` 压平成面向终端查看的分段文本，确保 CLI 场景能直接看到最终状态、写回摘要、审批历史、开放风险和 failure summary。
+- `renderBugfixReportMarkdown()` 负责生成适合知识沉淀和文档归档的 Markdown 版本，但仍然只消费标准 `BugfixReport`，不重新推断业务事实。
+- `renderBugfixReportJson()` 负责输出最完整、最稳定的结构化 JSON 版本，作为“同一份报告事实”的无损导出通道。
+- 三种输出都先通过 `BugfixReportSchema` 校验，是为了保证 renderer 不会绕过 domain 契约吞下半结构化对象。
+
+### `src/renderers/index.ts`
+
+- 在既有 `requirement-brief` renderer 之外新增对 `report.ts` 的公共导出。
+- 继续保持 renderer 层统一公共面，避免未来 CLI 或测试开始深引具体渲染文件。
+
+### `tests/unit/report/report-writer.spec.ts`
+
+- 任务 14 的核心单元测试。
+- 锁定三类最小闭环：成功 run 的最终报告组装、`partial_success` / `failed` 的差异化 `failure_summary` 与写回摘要、以及 CLI / Markdown / JSON 三种导出对同一份报告事实的映射一致性。
+- 这组测试把报告层行为单独固定下来，避免后续在接 CLI 命令时才发现“同一个 run 在不同输出渠道里讲了不同的话”。
+
+## 任务 14 架构洞察
+
+- 任务 14 最重要的 owner 收敛，是把“最终报告怎么组装”交给 skill，把“最终报告怎么展示”交给 renderer。这样任务 15 去接 CLI 命令时，只需要决定何时调用哪一个公共入口，而不用在命令处理器里重新定义报告字段。
+- 报告层没有回退成“直接读取所有中间工件再现场拼装”，而是继续建立在 `ExecutionContext` 当前有效态、审批历史和外部结果摘要之上，这延续了任务 2/3 建立的物理边界纪律：最终输出消费的是 ref 和摘要，不重新打破 redaction / storage 约束。
+- `failure_summary`、`jira_writeback_summary` 和 `feishu_record_summary` 被放进同一个 skill 统一生成，是为了防止 partial_success / failed / cancelled 这些跨阶段语义在不同输出渠道里各自解释。报告层应表达 run 结果，而不是让 CLI 或 Markdown 模板各自“猜一次最终状态”。
+- JSON、CLI、Markdown 三种导出共享同一份 `BugfixReport`，意味着后续无论是 CLI 查看、文件导出还是知识沉淀，都能围绕同一个事实源展开；这会显著降低任务 15 接线时的重复实现和口径漂移风险。

@@ -1,5 +1,213 @@
 # Progress
 
+## 2026-03-20 - v2 任务 4 步骤 4：统一 dry-run / execute payload 基线并冻结 reconcile-first 恢复决策
+
+### 本轮完成内容
+
+- 在 `src/workflow/jira-writeback.ts` 中新增 `planJiraV2Execution()`，作为 v2 Jira 写回的统一执行决策入口。
+- 新决策函数显式收敛两类规则：
+  - dry-run 与真实 execute 共用同一份 draft `request_payload` / `request_payload_hash`
+  - 当最新 side effect 为 `prepared`、`dispatched` 或 `outcome_unknown` 时，返回 `reconcile_before_retry`，禁止直接重发
+- `planJiraV2Execution()` 当前能区分五类结果：
+  - `preview_only`
+  - `execute`
+  - `skip_terminal`
+  - `reconcile_before_retry`（`prepared_side_effect_present`）
+  - `reconcile_before_retry`（`dispatched_side_effect_present` / `write_outcome_unknown`）
+- 在 `tests/unit/jira-writeback/jira-writeback.spec.ts` 中补齐步骤 4 的 red/green 覆盖：
+  - 锁定 dry-run 与 execute 拿到相同 payload 基线
+  - 锁定 `prepared` / `dispatched` / `outcome_unknown` 三类未安全收敛状态都必须先 reconcile
+- 在回归验证层补充运行：
+  - `npm run typecheck`
+  - `npm run test:integration -- tests/integration/cli/writeback-flows.spec.ts`
+  确认新契约未破坏既有 CLI writeback 子流程
+
+### 依据
+
+- 用户指令：在完成每一步后测试，通过后更新 `progress.md` 与 `architecture.md`；在任务 4 完成前不得进入任务 5。
+- `memory-bank/features/v2/实施计划.md` 任务 4 步骤 4：
+  - 明确 dry-run 与真实 execute 共享同一 payload 基线，恢复时先 reconcile 后决定是否重试。
+- `memory-bank/features/v1/实施计划.md` 与 `memory-bank/features/v1/技术方案.md`：
+  - 遇到 `outcome_unknown` 或 `prepared` / `dispatched` 未终态副作用时，恢复入口必须优先进入 reconcile。
+
+### 验证记录
+
+1. 验证对象：v2 Jira 执行决策基线与 reconcile-first 规则
+   触发方式：先修改 `tests/unit/jira-writeback/jira-writeback.spec.ts`，再运行 `npm run test:unit -- tests/unit/jira-writeback/jira-writeback.spec.ts`
+   预期结果：实现前准确暴露执行决策 helper 缺失；实现后 dry-run / execute payload 基线一致，且未终态副作用返回 reconcile
+   实际结果：通过；red 阶段暴露 `planJiraV2Execution` 缺失，green 后 unit 全量 `77/77` 通过
+
+2. 验证对象：TypeScript 类型一致性
+   触发方式：运行 `npm run typecheck`
+   预期结果：新的执行决策 union 与现有 v2 draft/ledger 类型在仓库范围内一致
+   实际结果：通过；命令退出码为 0
+
+3. 验证对象：受影响的 CLI writeback 回归
+   触发方式：运行 `npm run test:integration -- tests/integration/cli/writeback-flows.spec.ts`
+   预期结果：既有 `record jira` / `record feishu` 子工作流仍能完成 preview / approve / execute
+   实际结果：通过；integration 全量 `12/12` 通过
+
+### 当前边界说明
+
+- 任务 4 到此完成的是 Jira connector 与 workflow 的最小契约层：preview、execute result、target resolution、ledger 顺序、payload baseline 与 reconcile-first 决策都已冻结。
+- 目前还没有把这些 v2 helper 真正接进 CLI `execute-write`、run 恢复入口或 side-effects 文件持久化；这属于后续 app / workflow 接线工作，不能在本轮越界进入任务 5。
+- 当前仓库不存在额外 worktree；`git worktree list` 只显示 `/Users/sunyi/ai/MySkills` 上的 `main`。
+
+## 2026-03-20 - v2 任务 4 步骤 3：固定三类 Jira v2 side effect 的账本顺序与 result_ref 约束
+
+### 本轮完成内容
+
+- 在 `src/workflow/jira-writeback.ts` 中新增 v2 专用 side-effect ledger helper：
+  - `buildJiraV2PreparedEntry()`
+  - `markJiraV2EntryDispatched()`
+  - `finalizeJiraV2Entry()`
+- 新 helper 统一覆盖三类 operation：
+  - `jira.create_subtask`
+  - `jira.bind_branch`
+  - `jira.bind_commit`
+- 新 helper 通过 `JiraV2SideEffectLedgerEntrySchema` 强制以下约束：
+  - 账本顺序固定为 `prepared -> dispatched -> terminal`
+  - terminal `result_ref` 必须与 operation 对应
+    - subtask -> `artifact://jira/subtasks/result/...`
+    - branch -> `artifact://jira/bindings/branch/...`
+    - commit -> `artifact://jira/bindings/commit/...`
+  - `already_applied`、`external_request_id` 与终态 status 从结构化 result 回灌账本
+- 在 `tests/unit/jira-writeback/jira-writeback.spec.ts` 中补齐步骤 3 的 red/green 覆盖：
+  - 锁定 subtask / branch / commit 三条链路都走统一账本顺序
+  - 锁定 commit 在 `outcome_unknown` 下仍保留 operation-specific `result_ref`
+
+### 依据
+
+- 用户指令：每完成一个步骤必须先验证，验证通过后更新文档，再进入下一步骤。
+- `memory-bank/features/v2/实施计划.md` 任务 4 步骤 3：
+  - 固定三类操作的 `prepared`、`dispatched`、`succeeded`、`failed`、`outcome_unknown` 账本顺序。
+- `memory-bank/features/v1/技术方案.md`：
+  - side-effect ledger 是恢复与审计的唯一历史面，不能把 operation-specific 语义留给调用方临时拼接。
+
+### 验证记录
+
+1. 验证对象：v2 Jira side-effect ledger 顺序与 operation-specific `result_ref`
+   触发方式：先修改 `tests/unit/jira-writeback/jira-writeback.spec.ts`，再运行 `npm run test:unit -- tests/unit/jira-writeback/jira-writeback.spec.ts`
+   预期结果：实现前准确暴露 v2 ledger helper 缺失；实现后三类 operation 都能形成稳定 `prepared -> dispatched -> terminal` 顺序
+   实际结果：通过；red 阶段暴露 `buildJiraV2PreparedEntry` 缺失，green 后 unit 全量 `76/76` 通过
+
+2. 验证对象：TypeScript 类型一致性
+   触发方式：运行 `npm run typecheck`
+   预期结果：v2 ledger helper、draft/result union 与 workflow export 在仓库范围内类型一致
+   实际结果：通过；命令退出码为 0
+
+### 当前边界说明
+
+- 本步骤只冻结 v2 side-effect ledger 的对象顺序与 result_ref 语义，还没有把 dry-run / execute 的共享 payload 基线与 reconcile-first 恢复判断接进 workflow。
+- 当前 helper 只负责构造账本条目，不负责持久化 `side-effects.ndjson` 或从历史记录中做 dedupe/reconcile 决策。
+- CLI 仍未消费这些 v2 helper；真正把 `ensure-subtask` / branch / commit 接入统一写回 execute，仍属于任务 4 后续步骤或更后续的 app 接线。
+
+## 2026-03-20 - v2 任务 4 步骤 2：为 `jira.bind_branch` / `jira.bind_commit` 冻结 preview / result 与目标解析语义
+
+### 本轮完成内容
+
+- 在 `src/domain/schemas.ts` 中新增 branch / commit 绑定所需的最小 schema：
+  - `JiraBindingDraftSchema`
+  - `JiraBindingResultSchema`
+- 在 `src/infrastructure/connectors/jira/index.ts` 中新增共享的 binding 目标解析与纯映射逻辑：
+  - `resolveBindingTarget()`
+    - 当 profile 要求绑到 `subtask` 且显式提供了 subtask key 时，目标解析为子任务
+    - 当 branch binding 缺少 subtask key 且 profile 允许 `fallback_to_bug` 时，回落到 bug
+    - 当 commit binding 缺少 subtask key 且 profile 未授权 fallback 时，直接拒绝，避免静默写错目标
+  - `buildJiraBranchBindingPreviewDraft()`
+  - `buildJiraCommitBindingPreviewDraft()`
+  - `createJiraBranchBindingExecuteResult()`
+  - `createJiraCommitBindingExecuteResult()`
+- 新 draft / result 契约统一显式携带：
+  - `target_issue_key`
+  - `target_issue_source`
+  - `target_ref`
+  - `binding_value`
+  - `linked_value`
+  - `request_payload_hash`
+  - `dedupe_scope`
+- 在 `tests/unit/jira-writeback/jira-writeback.spec.ts` 中补齐步骤 2 的 red/green 覆盖：
+  - 锁定 branch 优先绑定 subtask、缺少 subtask 时允许 fallback 到 bug
+  - 锁定 commit 在未授权 fallback 时必须显式失败
+  - 锁定 branch / commit execute result 的统一结果形状
+
+### 依据
+
+- 用户指令：任务 4 必须按步骤推进；每步测试通过并同步文档后，才能进入下一步。
+- `memory-bank/features/v2/实施计划.md` 任务 4 步骤 2：
+  - 为 `jira.bind_branch`、`jira.bind_commit` 定义 preview draft、execute result 和目标解析语义。
+- `memory-bank/features/v1/技术方案.md`：
+  - 外部写回目标解析必须收敛在 infrastructure 层，不允许 CLI / workflow 临时猜测真实外部目标。
+  - 缺失关键信息时必须提示补录，不能静默猜测。
+
+### 验证记录
+
+1. 验证对象：branch / commit preview / result 契约与目标解析边界
+   触发方式：先修改 `tests/unit/jira-writeback/jira-writeback.spec.ts`，再运行 `npm run test:unit -- tests/unit/jira-writeback/jira-writeback.spec.ts`
+   预期结果：实现前准确暴露 branch / commit connector 能力缺失；实现后 target resolution、fallback 和结果断言成立
+   实际结果：通过；red 阶段暴露 `buildJiraBranchBindingPreviewDraft` 缺失与 commit target 解析缺失，green 后 unit 全量 `75/75` 通过
+
+2. 验证对象：TypeScript 类型一致性
+   触发方式：运行 `npm run typecheck`
+   预期结果：新增 binding schema、connector helper 与测试调用在仓库范围内类型一致
+   实际结果：通过；命令退出码为 0
+
+### 当前边界说明
+
+- 本步骤只冻结 branch / commit 的 connector 输入输出和目标解析规则，还没有把这两类操作接入 `prepared -> dispatched -> terminal` 的 v2 专用账本 helper。
+- 目前 execute result 仍是纯结构化对象；真正的 ledger result_ref 绑定、状态推进和恢复策略仍属于任务 4 后续步骤。
+- branch/commit 的 dedupe 目前只冻结在 draft 层的 `dedupe_scope`，尚未实现 reconcile 命中后的终态判定。
+
+## 2026-03-20 - v2 任务 4 步骤 1：为 `jira.create_subtask` 冻结 preview / execute / dedupe 契约
+
+### 本轮完成内容
+
+- 在 `src/domain/schemas.ts` 中新增子任务写回所需的最小 schema：
+  - `JiraSubtaskDedupeQuerySchema`
+  - `JiraSubtaskDraftSchema`
+  - `JiraSubtaskResultSchema`
+- 在 `src/infrastructure/connectors/jira/index.ts` 中新增 `jira.create_subtask` 的最小纯映射能力：
+  - `buildJiraSubtaskPreviewDraft()`
+    - 使用 `ProjectProfile.jira.subtask.summary_template`
+    - 生成稳定 `target_ref`
+    - 生成 `request_payload`、`request_payload_hash`
+    - 固定 `dedupe_scope = jira:<bug>:subtask`
+    - 生成基于 parent issue、issue type、summary 的 `dedupe_query`
+  - `createJiraSubtaskExecuteResult()`
+    - 将真实创建结果标准化为带 `created_issue_key` / `created_issue_id` 的结构化 result
+  - `createJiraSubtaskAlreadyAppliedResult()`
+    - 将 dedupe 命中结果标准化为 `already_applied = true` 的统一 result
+- 在 `tests/unit/jira-writeback/jira-writeback.spec.ts` 中补齐步骤 1 的 red/green 覆盖：
+  - 锁定 subtask preview draft 的 summary 模板、payload、hash、dedupe 查询与幂等 key
+  - 锁定新建子任务结果与 dedupe 命中结果的统一输出形状
+
+### 依据
+
+- 用户指令：继续执行 `memory-bank/features/v2/实施计划.md` 的任务 4；每完成一个步骤先测试，通过后更新 `progress.md` 与 `architecture.md`，然后再进入下一步骤。
+- `memory-bank/features/v2/实施计划.md` 任务 4 步骤 1：
+  - 为 `jira.create_subtask` 定义 preview draft、execute result 和 dedupe 查询语义。
+- `memory-bank/features/v1/技术方案.md`：
+  - `Infrastructure Layer` 是唯一外部系统访问入口，preview / execute 契约应先在 connector 收敛为结构化对象。
+  - 所有外部写回都要有稳定的 preview、幂等与恢复字段，不能只保留人类可读文本。
+
+### 验证记录
+
+1. 验证对象：`jira.create_subtask` preview / execute / dedupe 契约
+   触发方式：先修改 `tests/unit/jira-writeback/jira-writeback.spec.ts`，再运行 `npm run test:unit -- tests/unit/jira-writeback/jira-writeback.spec.ts`
+   预期结果：实现前准确暴露子任务 connector 契约缺失；实现后 subtask draft / result 断言成立
+   实际结果：通过；red 阶段暴露 `buildJiraSubtaskPreviewDraft` 与 `createJiraSubtaskExecuteResult` 缺失，green 后 unit 全量 `73/73` 通过
+
+2. 验证对象：TypeScript 类型一致性
+   触发方式：运行 `npm run typecheck`
+   预期结果：新增 subtask schema、type export 与 connector 返回结构在仓库范围内保持类型一致
+   实际结果：通过；命令退出码为 0
+
+### 当前边界说明
+
+- 本步骤只完成 `jira.create_subtask` 的 connector 契约冻结，还没有进入 `jira.bind_branch` / `jira.bind_commit` 的目标解析与结果建模。
+- 目前只定义了“如何形成稳定 preview / result / dedupe query”，尚未把 subtask result 接入 CLI execute、side-effect ledger 终态或 reconcile 路由。
+- `ensure-subtask` 仍然沿用任务 3 的本地 preview artifact 入口；真正把它切到 connector execute 链路，仍属于任务 4 后续步骤。
+
 ## 2026-03-20 - v2 任务 3 步骤 4：收敛三条入口的 workflow 状态语义与 status 引导
 
 ### 本轮完成内容

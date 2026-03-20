@@ -1,12 +1,20 @@
 import { createHash } from 'node:crypto';
 
 import {
+  JiraBindingDraftSchema,
+  JiraBindingResultSchema,
   JiraIssueSnapshotSchema,
+  JiraSubtaskDraftSchema,
+  JiraSubtaskResultSchema,
   JiraWritebackDraftSchema,
   JiraWritebackResultSchema,
   StructuredErrorSchema,
   type GitLabArtifact,
+  type JiraBindingDraft,
+  type JiraBindingResult,
   type JiraIssueSnapshot,
+  type JiraSubtaskDraft,
+  type JiraSubtaskResult,
   type JiraIssueWritebackTarget,
   type JiraWritebackDraft,
   type JiraWritebackResult,
@@ -100,6 +108,17 @@ const createTargetRef = ({
     ? `jira://${issueKey}/comment`
     : `jira://${issueKey}/field/${target.target_field_id_or_comment_mode}`;
 
+const createSubtaskTargetRef = (parentIssueKey: string) =>
+  `jira://${parentIssueKey}/subtasks`;
+
+const createBindingTargetRef = ({
+  targetIssueKey,
+  bindingType,
+}: {
+  targetIssueKey: string;
+  bindingType: 'branch' | 'commit';
+}) => `jira://${targetIssueKey}/development/${bindingType}`;
+
 const createDedupeScope = ({
   issueKey,
   target,
@@ -110,6 +129,31 @@ const createDedupeScope = ({
   target.target_type === 'comment'
     ? `jira:${issueKey}:comment`
     : `jira:${issueKey}:field:${target.target_field_id_or_comment_mode}`;
+
+const createSubtaskDedupeScope = (parentIssueKey: string) =>
+  `jira:${parentIssueKey}:subtask`;
+
+const createBindingDedupeScope = ({
+  targetIssueKey,
+  bindingType,
+  bindingValue,
+}: {
+  targetIssueKey: string;
+  bindingType: 'branch' | 'commit';
+  bindingValue: string;
+}) => `jira:${targetIssueKey}:${bindingType}:${bindingValue}`;
+
+const applyIssueTemplate = ({
+  template,
+  issueSnapshot,
+}: {
+  template: string;
+  issueSnapshot: JiraIssueSnapshot;
+}) =>
+  template
+    .replaceAll('{issue_key}', issueSnapshot.issue_key)
+    .replaceAll('{summary}', issueSnapshot.summary)
+    .replaceAll('{description}', issueSnapshot.description);
 
 const createWritebackMarker = ({
   issueKey,
@@ -171,6 +215,105 @@ const renderPreviewBody = ({
     '',
     `<!-- ${marker} -->`,
   ].join('\n');
+};
+
+const renderSubtaskPreview = ({
+  issueSnapshot,
+  renderedSummary,
+  renderedDescription,
+  issueTypeId,
+}: {
+  issueSnapshot: JiraIssueSnapshot;
+  renderedSummary: string;
+  renderedDescription: string | null;
+  issueTypeId: string;
+}) =>
+  [
+    `Create Jira subtask for ${issueSnapshot.issue_key}`,
+    '',
+    `Parent issue: ${issueSnapshot.issue_key}`,
+    `Issue type id: ${issueTypeId}`,
+    `Summary: ${renderedSummary}`,
+    `Description: ${renderedDescription ?? 'not provided'}`,
+  ].join('\n');
+
+const renderBindingPreview = ({
+  operation,
+  targetIssueKey,
+  targetIssueSource,
+  bindingValue,
+}: {
+  operation: 'jira.bind_branch' | 'jira.bind_commit';
+  targetIssueKey: string;
+  targetIssueSource: 'bug' | 'subtask';
+  bindingValue: string;
+}) =>
+  [
+    `${operation} for ${targetIssueKey}`,
+    '',
+    `Target issue: ${targetIssueKey}`,
+    `Target source: ${targetIssueSource}`,
+    `Binding value: ${bindingValue}`,
+  ].join('\n');
+
+const resolveBindingTarget = ({
+  issueSnapshot,
+  subtaskIssueKey,
+  preferredSource,
+  allowFallbackToBug,
+  operation,
+  timestamp,
+}: {
+  issueSnapshot: JiraIssueSnapshot;
+  subtaskIssueKey?: string;
+  preferredSource: 'bug' | 'subtask';
+  allowFallbackToBug: boolean;
+  operation: 'jira.bind_branch' | 'jira.bind_commit';
+  timestamp?: string;
+}): {
+  targetIssueKey: string;
+  targetIssueSource: 'bug' | 'subtask';
+} => {
+  if (preferredSource === 'bug') {
+    return {
+      targetIssueKey: issueSnapshot.issue_key,
+      targetIssueSource: 'bug',
+    };
+  }
+
+  if (subtaskIssueKey?.trim()) {
+    return {
+      targetIssueKey: subtaskIssueKey.trim(),
+      targetIssueSource: 'subtask',
+    };
+  }
+
+  if (allowFallbackToBug) {
+    return {
+      targetIssueKey: issueSnapshot.issue_key,
+      targetIssueSource: 'bug',
+    };
+  }
+
+  throw StructuredErrorSchema.parse({
+    code: 'jira_binding_target_missing',
+    category: 'validation_error',
+    stage: 'Artifact Linking',
+    system: 'jira',
+    operation,
+    target_ref: `jira:${issueSnapshot.issue_key}`,
+    message:
+      `${operation} requires an explicit subtask issue key because the current project profile does not allow fallback to the bug issue.`,
+    detail:
+      'Provide the subtask issue key explicitly or update the project profile binding policy before retrying.',
+    retryable: false,
+    outcome_unknown: false,
+    user_action:
+      'Re-run the operation with an explicit subtask issue key, or relax the project profile fallback policy first.',
+    raw_cause_ref: null,
+    partial_state_ref: null,
+    timestamp: timestamp ?? new Date().toISOString(),
+  });
 };
 
 export const buildJiraIssueSnapshot = ({
@@ -280,6 +423,73 @@ export const buildJiraWritebackPreviewDraft = ({
   });
 };
 
+export const buildJiraSubtaskPreviewDraft = ({
+  projectProfile,
+  issueSnapshot,
+  generatedAt,
+}: {
+  projectProfile: ProjectProfile;
+  issueSnapshot: JiraIssueSnapshot;
+  generatedAt: string;
+}): JiraSubtaskDraft => {
+  const normalizedIssueSnapshot = JiraIssueSnapshotSchema.parse(issueSnapshot);
+  const renderedSummary = applyIssueTemplate({
+    template: projectProfile.jira.subtask.summary_template,
+    issueSnapshot: normalizedIssueSnapshot,
+  }).trim();
+  const renderedDescription = projectProfile.jira.subtask.description_template
+    ? applyIssueTemplate({
+        template: projectProfile.jira.subtask.description_template,
+        issueSnapshot: normalizedIssueSnapshot,
+      }).trim()
+    : null;
+  const targetRef = createSubtaskTargetRef(normalizedIssueSnapshot.issue_key);
+  const requestPayload = {
+    fields: {
+      project: {
+        key: normalizedIssueSnapshot.project_key,
+      },
+      parent: {
+        key: normalizedIssueSnapshot.issue_key,
+      },
+      issuetype: {
+        id: projectProfile.jira.subtask.issue_type_id,
+      },
+      summary: renderedSummary,
+      ...(renderedDescription ? { description: renderedDescription } : {}),
+    },
+    generated_at: generatedAt,
+  };
+  const dedupeScope = createSubtaskDedupeScope(normalizedIssueSnapshot.issue_key);
+
+  return JiraSubtaskDraftSchema.parse({
+    operation: 'jira.create_subtask',
+    parent_issue_key: normalizedIssueSnapshot.issue_key,
+    issue_type_id: projectProfile.jira.subtask.issue_type_id,
+    target_ref: targetRef,
+    rendered_summary: renderedSummary,
+    rendered_preview: renderSubtaskPreview({
+      issueSnapshot: normalizedIssueSnapshot,
+      renderedSummary,
+      renderedDescription,
+      issueTypeId: projectProfile.jira.subtask.issue_type_id,
+    }),
+    request_payload: requestPayload,
+    request_payload_hash: sha256(requestPayload),
+    idempotency_key: `${dedupeScope}:${sha256(requestPayload).slice(
+      'sha256:'.length,
+      'sha256:'.length + 16,
+    )}`,
+    dedupe_scope: dedupeScope,
+    dedupe_query: {
+      parent_issue_key: normalizedIssueSnapshot.issue_key,
+      issue_type_id: projectProfile.jira.subtask.issue_type_id,
+      summary: renderedSummary,
+    },
+    expected_target_version: null,
+  });
+};
+
 const createJiraResultUrl = (issueKey: string) =>
   `https://jira.example.com/browse/${issueKey}`;
 
@@ -329,6 +539,276 @@ export const createJiraAlreadyAppliedResult = ({
     already_applied: true,
     external_request_id: externalRequestId,
     updated_at: updatedAt,
+  });
+
+export const createJiraSubtaskExecuteResult = ({
+  resultId,
+  parentIssueKey,
+  subtaskIssueKey,
+  subtaskIssueId,
+  targetVersion,
+  updatedAt,
+  externalRequestId,
+}: {
+  resultId: string;
+  parentIssueKey: string;
+  subtaskIssueKey: string;
+  subtaskIssueId: string;
+  targetVersion: string;
+  updatedAt: string;
+  externalRequestId: string | null;
+}): JiraSubtaskResult =>
+  JiraSubtaskResultSchema.parse({
+    result_id: resultId,
+    target_ref: createSubtaskTargetRef(parentIssueKey),
+    target_version: targetVersion,
+    result_url: createJiraResultUrl(subtaskIssueKey),
+    already_applied: false,
+    external_request_id: externalRequestId,
+    updated_at: updatedAt,
+    created_issue_key: subtaskIssueKey,
+    created_issue_id: subtaskIssueId,
+  });
+
+export const createJiraSubtaskAlreadyAppliedResult = ({
+  parentIssueKey,
+  subtaskIssueKey,
+  dedupeKey,
+  externalRequestId,
+  updatedAt,
+}: {
+  parentIssueKey: string;
+  subtaskIssueKey: string;
+  dedupeKey: string;
+  externalRequestId: string | null;
+  updatedAt: string;
+}): JiraSubtaskResult =>
+  JiraSubtaskResultSchema.parse({
+    result_id: `already-applied:${sha256(dedupeKey).slice(
+      'sha256:'.length,
+      'sha256:'.length + 12,
+    )}`,
+    target_ref: createSubtaskTargetRef(parentIssueKey),
+    target_version: 'already_applied',
+    result_url: createJiraResultUrl(subtaskIssueKey),
+    already_applied: true,
+    external_request_id: externalRequestId,
+    updated_at: updatedAt,
+    created_issue_key: subtaskIssueKey,
+    created_issue_id: null,
+  });
+
+const buildJiraBindingPreviewDraft = ({
+  operation,
+  bindingType,
+  bindingValue,
+  issueSnapshot,
+  subtaskIssueKey,
+  preferredSource,
+  allowFallbackToBug,
+  generatedAt,
+}: {
+  operation: 'jira.bind_branch' | 'jira.bind_commit';
+  bindingType: 'branch' | 'commit';
+  bindingValue: string;
+  issueSnapshot: JiraIssueSnapshot;
+  subtaskIssueKey?: string;
+  preferredSource: 'bug' | 'subtask';
+  allowFallbackToBug: boolean;
+  generatedAt: string;
+}): JiraBindingDraft => {
+  const normalizedIssueSnapshot = JiraIssueSnapshotSchema.parse(issueSnapshot);
+  const normalizedBindingValue = bindingValue.trim();
+  const target = resolveBindingTarget({
+    issueSnapshot: normalizedIssueSnapshot,
+    subtaskIssueKey,
+    preferredSource,
+    allowFallbackToBug,
+    operation,
+    timestamp: generatedAt,
+  });
+  const requestPayload = {
+    target_issue_key: target.targetIssueKey,
+    target_issue_source: target.targetIssueSource,
+    binding_type: bindingType,
+    binding_value: normalizedBindingValue,
+    generated_at: generatedAt,
+  };
+  const dedupeScope = createBindingDedupeScope({
+    targetIssueKey: target.targetIssueKey,
+    bindingType,
+    bindingValue: normalizedBindingValue,
+  });
+
+  return JiraBindingDraftSchema.parse({
+    operation,
+    target_issue_key: target.targetIssueKey,
+    target_issue_source: target.targetIssueSource,
+    target_ref: createBindingTargetRef({
+      targetIssueKey: target.targetIssueKey,
+      bindingType,
+    }),
+    binding_value: normalizedBindingValue,
+    rendered_preview: renderBindingPreview({
+      operation,
+      targetIssueKey: target.targetIssueKey,
+      targetIssueSource: target.targetIssueSource,
+      bindingValue: normalizedBindingValue,
+    }),
+    request_payload: requestPayload,
+    request_payload_hash: sha256(requestPayload),
+    idempotency_key: `${dedupeScope}:${sha256(requestPayload).slice(
+      'sha256:'.length,
+      'sha256:'.length + 16,
+    )}`,
+    dedupe_scope: dedupeScope,
+    expected_target_version: null,
+  });
+};
+
+const createJiraBindingExecuteResult = ({
+  operation,
+  bindingType,
+  targetIssueKey,
+  targetIssueSource,
+  bindingValue,
+  targetVersion,
+  updatedAt,
+  externalRequestId,
+}: {
+  operation: 'jira.bind_branch' | 'jira.bind_commit';
+  bindingType: 'branch' | 'commit';
+  targetIssueKey: string;
+  targetIssueSource: 'bug' | 'subtask';
+  bindingValue: string;
+  targetVersion: string;
+  updatedAt: string;
+  externalRequestId: string | null;
+}): JiraBindingResult =>
+  {
+    const normalizedBindingValue = bindingValue.trim();
+    return JiraBindingResultSchema.parse({
+      result_id: `${operation}:${sha256({
+        targetIssueKey,
+        bindingType,
+        bindingValue: normalizedBindingValue,
+        updatedAt,
+      }).slice('sha256:'.length, 'sha256:'.length + 12)}`,
+      target_ref: createBindingTargetRef({
+        targetIssueKey,
+        bindingType,
+      }),
+      target_version: targetVersion,
+      result_url: createJiraResultUrl(targetIssueKey),
+      already_applied: false,
+      external_request_id: externalRequestId,
+      updated_at: updatedAt,
+      target_issue_key: targetIssueKey,
+      target_issue_source: targetIssueSource,
+      linked_value: normalizedBindingValue,
+    });
+  };
+
+export const buildJiraBranchBindingPreviewDraft = ({
+  projectProfile,
+  issueSnapshot,
+  branchName,
+  subtaskIssueKey,
+  generatedAt,
+}: {
+  projectProfile: ProjectProfile;
+  issueSnapshot: JiraIssueSnapshot;
+  branchName: string;
+  subtaskIssueKey?: string;
+  generatedAt: string;
+}): JiraBindingDraft =>
+  buildJiraBindingPreviewDraft({
+    operation: 'jira.bind_branch',
+    bindingType: 'branch',
+    bindingValue: branchName,
+    issueSnapshot,
+    subtaskIssueKey,
+    preferredSource: projectProfile.jira.branch_binding.target_issue_source,
+    allowFallbackToBug:
+      projectProfile.jira.branch_binding.fallback_to_bug ?? false,
+    generatedAt,
+  });
+
+export const buildJiraCommitBindingPreviewDraft = ({
+  projectProfile,
+  issueSnapshot,
+  commitSha,
+  subtaskIssueKey,
+  generatedAt,
+}: {
+  projectProfile: ProjectProfile;
+  issueSnapshot: JiraIssueSnapshot;
+  commitSha: string;
+  subtaskIssueKey?: string;
+  generatedAt: string;
+}): JiraBindingDraft =>
+  buildJiraBindingPreviewDraft({
+    operation: 'jira.bind_commit',
+    bindingType: 'commit',
+    bindingValue: commitSha,
+    issueSnapshot,
+    subtaskIssueKey,
+    preferredSource: projectProfile.jira.commit_binding.target_issue_source,
+    allowFallbackToBug:
+      projectProfile.jira.commit_binding.fallback_to_bug ?? false,
+    generatedAt,
+  });
+
+export const createJiraBranchBindingExecuteResult = ({
+  targetIssueKey,
+  targetIssueSource,
+  branchName,
+  targetVersion,
+  updatedAt,
+  externalRequestId,
+}: {
+  targetIssueKey: string;
+  targetIssueSource: 'bug' | 'subtask';
+  branchName: string;
+  targetVersion: string;
+  updatedAt: string;
+  externalRequestId: string | null;
+}): JiraBindingResult =>
+  createJiraBindingExecuteResult({
+    operation: 'jira.bind_branch',
+    bindingType: 'branch',
+    targetIssueKey,
+    targetIssueSource,
+    bindingValue: branchName,
+    targetVersion,
+    updatedAt,
+    externalRequestId,
+  });
+
+export const createJiraCommitBindingExecuteResult = ({
+  targetIssueKey,
+  targetIssueSource,
+  commitSha,
+  targetVersion,
+  updatedAt,
+  externalRequestId,
+}: {
+  targetIssueKey: string;
+  targetIssueSource: 'bug' | 'subtask';
+  commitSha: string;
+  targetVersion: string;
+  updatedAt: string;
+  externalRequestId: string | null;
+}): JiraBindingResult =>
+  createJiraBindingExecuteResult({
+    operation: 'jira.bind_commit',
+    bindingType: 'commit',
+    targetIssueKey,
+    targetIssueSource,
+    bindingValue: commitSha,
+    targetVersion,
+    updatedAt,
+    externalRequestId,
   });
 
 export const createJiraPermissionDeniedError = ({

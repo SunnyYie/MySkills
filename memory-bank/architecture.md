@@ -1,5 +1,161 @@
 # Architecture Notes
 
+## v2 任务 4 步骤 4 当前 v2 Jira 执行决策层
+
+当 connector 契约和 ledger 顺序都稳定之后，最后一个缺口是：谁来决定 dry-run 和真实 execute 用的到底是不是同一份 payload，以及恢复时什么时候必须先 reconcile。这个判断如果分散在 CLI、app 和 workflow 多处，很容易出现“预览看的是一份 payload，真正执行发的是另一份”或者“看到 prepared 记录就直接重发”的风险。
+
+## 新增/调整文件职责
+
+### `src/workflow/jira-writeback.ts`
+
+- 本轮新增 `planJiraV2Execution()`，把 v2 Jira 写回的执行前决策收敛到一个地方。
+- 它现在承担三类职责：
+  - 返回 dry-run `preview_only` 决策
+  - 返回真实 `execute` 决策
+  - 在发现 `prepared` / `dispatched` / `outcome_unknown` 时，返回 `reconcile_before_retry`
+- 关键点是：不管最终动作是什么，它都会把同一份 `request_payload` 与 `request_payload_hash` 带出来，确保 preview 和 execute 共用同一 payload 基线。
+
+### `tests/unit/jira-writeback/jira-writeback.spec.ts`
+
+- 新增断言把“执行前决策”也纳入 v2 契约保护面。
+- 它现在不仅验证对象长什么样，还验证 workflow 在不同 ledger 状态下会给出什么决策：
+  - 新写入时可 preview / execute
+  - 有未终态副作用时必须 reconcile
+  - 不允许直接跳过这层判断
+
+## 任务 4 步骤 4 架构洞察
+
+- `planJiraV2Execution()` 返回的是“决策对象”而不是直接执行副作用，这是一个很刻意的边界。workflow 只负责说明现在该 preview、execute、skip 还是 reconcile，真正去调用 connector execute 仍然应该由 app 层装配。这样不会把 I/O 逻辑再次反塞回 workflow。
+
+- 把 `request_payload` / `request_payload_hash` 一起从决策层带出，意味着“审批看到的 payload”和“执行实际使用的 payload”终于有了统一 owner。后续只要审批记录绑定这个 hash，就能直接验证 execute 是否还在使用同一份基线。
+
+- `prepared`、`dispatched`、`outcome_unknown` 被统一映射为 `reconcile_before_retry`，说明恢复规则已经不再只是 state-machine 的抽象原则，而开始落到具体 Jira v2 写回链路里。后续真正接恢复入口时，可以直接消费这个决策，而不用再重新解释每一种 status 的含义。
+
+## v2 任务 4 步骤 3 当前 v2 Jira side-effect ledger 规则层
+
+当 subtask / branch / commit 都已经有了各自的 preview/result 契约后，下一步必须把它们收敛到统一账本顺序里，否则恢复时仍然不知道“哪些操作已经准备过、哪些已经发出去、哪些虽然失败但结果未知”。
+
+## 新增/调整文件职责
+
+### `src/workflow/jira-writeback.ts`
+
+- 这一轮新增了 v2 专用 ledger helper，而不是继续把 v2 操作塞进原来的 comment/field helper。
+- `buildJiraV2PreparedEntry()` 负责把 `JiraSubtaskDraft` / `JiraBindingDraft` 收敛成统一的 `prepared` 账本条目。
+- `markJiraV2EntryDispatched()` 负责把 external request id 和时间戳推进到 `dispatched`。
+- `finalizeJiraV2Entry()` 负责把 `JiraSubtaskResult` / `JiraBindingResult` 回写为 terminal 账本条目，并保留：
+  - `already_applied`
+  - `external_request_id`
+  - operation-specific `result_ref`
+- 这些 helper 全部通过 `JiraV2SideEffectLedgerEntrySchema` 做最终校验，避免调用方把 subtask/branch/commit 的 result ref 串用。
+
+### `tests/unit/jira-writeback/jira-writeback.spec.ts`
+
+- 本轮它除了验证 connector 契约，还开始验证 workflow 层如何消费这些契约。
+- 新增断言覆盖三条事实：
+  - 三类 operation 都必须先 `prepared`
+  - 发出请求后必须显式变成 `dispatched`
+  - terminal 可以是 `succeeded` 或 `outcome_unknown`，但都要带上正确类型的 `result_ref`
+
+## 任务 4 步骤 3 架构洞察
+
+- v2 Jira ledger helper 独立于 v1 comment/field helper，是一个很重要的分层信号：虽然它们都叫 Jira writeback，但“创建子任务”和“更新已有 issue 字段/评论”不是同一类副作用，账本语义需要共享骨架，但不能强行混成一个 operation 命名空间。
+
+- `result_ref` 类型被纳入 schema 校验，意味着 side-effect ledger 不再只是“记录发生过什么”，而开始成为恢复决策的可信输入。后续 reconcile 如果看到 `jira.bind_commit` 却挂了 branch result ref，可以在 schema 层就挡住，而不是等运行时出现模糊状态。
+
+- `outcome_unknown` 也走 terminal helper，而不是单独旁路生成对象，这能保证“未知结果”仍然保留和成功/失败一致的最小审计字段。恢复逻辑只需要关心 status，不需要再兼容另一套对象形状。
+
+## v2 任务 4 步骤 2 当前 branch / commit 目标解析层
+
+子任务 preview/result 契约冻结之后，下一层关键问题就变成：branch 和 commit 到底应该写回到哪个 Jira issue。这个决策不能留给 CLI 临时猜，也不能放进 workflow 状态机里隐式推断，因为它本质上是“Jira connector 如何解析目标”的问题。
+
+## 新增/调整文件职责
+
+### `src/domain/schemas.ts`
+
+- 本轮新增 `JiraBindingDraftSchema` 与 `JiraBindingResultSchema`，为 branch/commit 绑定提供统一契约面。
+- 这两个 schema 把以下信息显式化：
+  - `target_issue_key`
+  - `target_issue_source`
+  - `target_ref`
+  - `binding_value` / `linked_value`
+  - `request_payload_hash`
+  - `dedupe_scope`
+- 这样 branch/commit 终于不再只是“一个 artifact ref 指向某段 JSON”，而是拥有稳定可验证的 preview/result 结构。
+
+### `src/infrastructure/connectors/jira/index.ts`
+
+- 这一轮新增的核心不是 payload 拼装本身，而是 `resolveBindingTarget()`。
+- 它现在明确承载三条解析语义：
+  - profile 指向 `subtask` 且 subtask key 已提供时，目标就是子任务
+  - branch binding 缺少 subtask key 但 profile 允许 `fallback_to_bug` 时，可以回落到 bug
+  - commit binding 若缺少 subtask key 且未授权 fallback，必须失败，不能静默改绑到 bug
+- `buildJiraBranchBindingPreviewDraft()` 与 `buildJiraCommitBindingPreviewDraft()` 基于这个解析结果生成统一 preview draft。
+- `createJiraBranchBindingExecuteResult()` 与 `createJiraCommitBindingExecuteResult()` 则把执行终态收敛成同一结果模型。
+
+### `tests/unit/jira-writeback/jira-writeback.spec.ts`
+
+- 这一步开始保护一条非常关键的边界：不是所有“没拿到 subtask key”的场景都可以 fallback。
+- 测试现在会明确阻止一种高风险回归：
+  - 开发者为了“方便”把 commit 也默认回落到 bug，导致 commit 被写到错误 issue
+- 同时它也确认 branch binding 可以在 profile 明确授权时安全回落，不会把允许的灵活性误收紧成硬失败。
+
+## 任务 4 步骤 2 架构洞察
+
+- branch binding 和 commit binding 共用一套 draft/result schema，但不共用完全相同的目标解析策略。这说明“结构可复用”和“业务语义一致”不是一回事，复用应该发生在对象形状层，而不是硬把所有策略做成一样。
+
+- `target_issue_source` 被显式保留在 preview 和 result 里，是一个对恢复与审计都很重要的设计：后续即使只看 artifact 或 ledger，也能知道这次写回到底是针对 bug 还是 subtask，而不必从 target ref 字符串反推。
+
+- commit 默认不静默 fallback 到 bug，是对“缺失关键信息时必须提示补录、不能静默猜测”原则的直接落实。相比之下，branch 允许 fallback 是因为 profile 明确授权了这个降级路径，两者不是矛盾，而是同一原则在不同配置下的不同表现。
+
+## v2 任务 4 步骤 1 当前 `jira.create_subtask` connector 契约层
+
+任务 3 只把 “ensure-subtask” 做成了一个本地 preview 入口，但真正决定“预览长什么样、execute 应返回什么、重复执行怎么查重”的责任，必须落回 Jira connector。这一步的意义是先把 `jira.create_subtask` 变成稳定的结构化契约，再让 CLI、workflow、ledger 去消费它。
+
+## 新增/调整文件职责
+
+### `src/domain/schemas.ts`
+
+- 这一轮开始承担 v2 子任务写回的独立契约定义，而不再把它混进通用 comment/field writeback schema。
+- 新增三块职责：
+  - `JiraSubtaskDedupeQuerySchema`
+    - 冻结“如何判断子任务已存在”的最小查询面：`parent_issue_key`、`issue_type_id`、`summary`
+  - `JiraSubtaskDraftSchema`
+    - 冻结 preview 中间态，不只保留 `request_payload`，还显式保留 `rendered_summary`、`target_ref`、`request_payload_hash`、`dedupe_scope`、`dedupe_query`
+  - `JiraSubtaskResultSchema`
+    - 冻结 execute 终态，不只返回通用 result 元数据，还显式记录 `created_issue_key` / `created_issue_id`
+- 这让 subtask 创建第一次拥有了和已有 Jira/Feishu writeback 对称的“可审批、可幂等、可恢复”的结构化中间面。
+
+### `src/infrastructure/connectors/jira/index.ts`
+
+- 这一步新增的不是“真实 API 调用”，而是 connector 层的纯映射规则。
+- `buildJiraSubtaskPreviewDraft()` 负责：
+  - 从 `ProjectProfile.jira.subtask.summary_template` 渲染稳定 summary
+  - 生成 Jira create-subtask 所需 `request_payload`
+  - 计算 `request_payload_hash`
+  - 固定 `target_ref = jira://<bug>/subtasks`
+  - 生成 `dedupe_scope` 与 `dedupe_query`
+- `createJiraSubtaskExecuteResult()` 负责把“真实创建成功”的外部结果标准化为 workflow 后续可消费的结构化结果。
+- `createJiraSubtaskAlreadyAppliedResult()` 负责把“dedupe 命中、无需重复创建”的结果标准化到同一结果模型，而不是让调用方用另一套分支对象表达。
+
+### `tests/unit/jira-writeback/jira-writeback.spec.ts`
+
+- 本轮它开始保护的不再只是 v1 comment/field writeback，而是 v2 子任务写回的最小 connector 契约。
+- 新增断言覆盖了三类关键事实：
+  - 子任务 preview 真的由项目画像模板驱动，而不是 CLI 临时拼接
+  - execute 成功和 dedupe 命中使用统一结果模型
+  - `dedupe_query` 是一个显式结构，不再是“调用方自己约定怎么查”
+
+## 任务 4 步骤 1 架构洞察
+
+- `dedupe_scope` 和 `dedupe_query` 被拆开，是一个很重要的边界：
+  - `dedupe_scope` 解决“这类操作的幂等归属是谁”
+  - `dedupe_query` 解决“去 Jira 里查现有子任务时，按什么语义判断已存在”
+  把二者混成一个字符串，后续 reconcile 会很难扩展。
+
+- 子任务 result 额外携带 `created_issue_key` / `created_issue_id`，说明 subtask 创建和普通 comment/field 写回并不完全对称。它不是“更新同一个目标”，而是“在父 bug 下创建一个新的 Jira issue”。因此 result 必须能把“新对象是谁”带回 workflow。
+
+- 这一步故意还没有接 CLI execute 或 ledger 终态，是在守住任务边界：先冻结 connector 契约，再让步骤 2/3/4 分别把 branch/commit、账本顺序和 reconcile-first 恢复接上去。这样后续接线时，就不需要一边补行为一边返工 payload 结构。
+
 ## v2 任务 3 步骤 4 当前状态语义收敛层
 
 前三步把命令入口都补出来之后，最后一个关键问题是：`run status` 到底能不能准确告诉用户“现在缺什么、下一步做什么、旧 preview 还是否有效”。这一步的价值在于把三个入口从“能调用”收敛成“能被状态机正确解释”。

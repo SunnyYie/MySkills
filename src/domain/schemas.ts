@@ -74,6 +74,7 @@ const VerificationOutcomeSchema = z.enum(VERIFICATION_OUTCOMES);
 const VerificationCheckStatusSchema = z.enum(VERIFICATION_CHECK_STATUSES);
 const VerificationInputSourceSchema = z.enum(VERIFICATION_INPUT_SOURCES);
 const JiraWritebackTargetTypeSchema = z.enum(JIRA_WRITEBACK_TARGET_TYPES);
+const JiraBindingTargetSourceSchema = z.enum(['bug', 'subtask']);
 const FeishuWriteModeSchema = z.enum(FEISHU_WRITE_MODES);
 const SideEffectStatusSchema = z.enum(SIDE_EFFECT_STATUSES);
 const ErrorCategorySchema = z.enum(ERROR_CATEGORIES);
@@ -386,6 +387,76 @@ export const JiraWritebackResultSchema = z
     already_applied: z.boolean(),
     external_request_id: NonEmptyStringSchema.nullable(),
     updated_at: TimestampSchema,
+  })
+  .strict();
+
+export const JiraSubtaskDedupeQuerySchema = z
+  .object({
+    parent_issue_key: NonEmptyStringSchema,
+    issue_type_id: NonEmptyStringSchema,
+    summary: NonEmptyStringSchema,
+  })
+  .strict();
+
+export const JiraSubtaskDraftSchema = z
+  .object({
+    operation: z.literal('jira.create_subtask'),
+    parent_issue_key: NonEmptyStringSchema,
+    issue_type_id: NonEmptyStringSchema,
+    target_ref: NonEmptyStringSchema,
+    rendered_summary: NonEmptyStringSchema,
+    rendered_preview: NonEmptyStringSchema,
+    request_payload: JsonValueSchema,
+    request_payload_hash: NonEmptyStringSchema,
+    idempotency_key: NonEmptyStringSchema,
+    dedupe_scope: NonEmptyStringSchema,
+    dedupe_query: JiraSubtaskDedupeQuerySchema,
+    expected_target_version: NonEmptyStringSchema.nullable(),
+  })
+  .strict();
+
+export const JiraSubtaskResultSchema = z
+  .object({
+    result_id: NonEmptyStringSchema,
+    target_ref: NonEmptyStringSchema,
+    target_version: NonEmptyStringSchema,
+    result_url: UrlSchema,
+    already_applied: z.boolean(),
+    external_request_id: NonEmptyStringSchema.nullable(),
+    updated_at: TimestampSchema,
+    created_issue_key: NonEmptyStringSchema,
+    created_issue_id: NonEmptyStringSchema.nullable(),
+  })
+  .strict();
+
+export const JiraBindingDraftSchema = z
+  .object({
+    operation: z.enum(['jira.bind_branch', 'jira.bind_commit']),
+    target_issue_key: NonEmptyStringSchema,
+    target_issue_source: JiraBindingTargetSourceSchema,
+    target_ref: NonEmptyStringSchema,
+    binding_value: NonEmptyStringSchema,
+    rendered_preview: NonEmptyStringSchema,
+    request_payload: JsonValueSchema,
+    request_payload_hash: NonEmptyStringSchema,
+    idempotency_key: NonEmptyStringSchema,
+    dedupe_scope: NonEmptyStringSchema,
+    expected_target_version: NonEmptyStringSchema.nullable(),
+  })
+  .strict();
+
+export const JiraBindingResultSchema = z
+  .object({
+    result_id: NonEmptyStringSchema,
+    target_ref: NonEmptyStringSchema,
+    target_version: NonEmptyStringSchema,
+    result_url: UrlSchema,
+    already_applied: z.boolean(),
+    external_request_id: NonEmptyStringSchema.nullable(),
+    updated_at: TimestampSchema,
+    target_issue_key: NonEmptyStringSchema,
+    target_issue_source: JiraBindingTargetSourceSchema,
+    linked_value: NonEmptyStringSchema,
   })
   .strict();
 
@@ -727,6 +798,11 @@ export type VerificationCheck = z.infer<typeof VerificationCheckSchema>;
 export type VerificationResult = z.infer<typeof VerificationResultSchema>;
 export type JiraWritebackDraft = z.infer<typeof JiraWritebackDraftSchema>;
 export type JiraWritebackResult = z.infer<typeof JiraWritebackResultSchema>;
+export type JiraSubtaskDedupeQuery = z.infer<typeof JiraSubtaskDedupeQuerySchema>;
+export type JiraSubtaskDraft = z.infer<typeof JiraSubtaskDraftSchema>;
+export type JiraSubtaskResult = z.infer<typeof JiraSubtaskResultSchema>;
+export type JiraBindingDraft = z.infer<typeof JiraBindingDraftSchema>;
+export type JiraBindingResult = z.infer<typeof JiraBindingResultSchema>;
 export type FeishuRecordDraft = z.infer<typeof FeishuRecordDraftSchema>;
 export type FeishuRecordResult = z.infer<typeof FeishuRecordResultSchema>;
 export type RepoSelection = z.infer<typeof RepoSelectionSchema>;

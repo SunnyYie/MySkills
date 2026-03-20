@@ -2,12 +2,18 @@ import { createHash } from 'node:crypto';
 
 import {
   ApprovalRecordSchema,
+  JiraV2SideEffectLedgerEntrySchema,
   SideEffectLedgerEntrySchema,
   StructuredErrorSchema,
   type ApprovalRecord,
   type ExecutionContext,
+  type JiraBindingDraft,
+  type JiraBindingResult,
+  type JiraSubtaskDraft,
+  type JiraSubtaskResult,
   type JiraWritebackDraft,
   type JiraWritebackResult,
+  type JiraV2SideEffectLedgerEntry,
   type ProjectProfile,
   type SideEffectLedgerEntry,
   type StructuredError,
@@ -255,5 +261,147 @@ export const shouldSkipJiraWritebackExecution = ({
   return {
     skip: false,
     reason: null,
+  };
+};
+
+export const buildJiraV2PreparedEntry = ({
+  draft,
+  attemptNo,
+  executedAt,
+}: {
+  draft: JiraSubtaskDraft | JiraBindingDraft;
+  attemptNo: number;
+  executedAt: string;
+}): JiraV2SideEffectLedgerEntry =>
+  JiraV2SideEffectLedgerEntrySchema.parse({
+    system: 'jira',
+    operation: draft.operation,
+    idempotency_key: draft.idempotency_key,
+    dedupe_scope: draft.dedupe_scope,
+    request_payload_hash: draft.request_payload_hash,
+    target_ref: draft.target_ref,
+    expected_target_version: draft.expected_target_version,
+    result_ref: null,
+    status: 'prepared',
+    attempt_no: attemptNo,
+    already_applied: false,
+    external_request_id: null,
+    executed_at: executedAt,
+  });
+
+export const markJiraV2EntryDispatched = ({
+  entry,
+  externalRequestId,
+  executedAt,
+}: {
+  entry: JiraV2SideEffectLedgerEntry;
+  externalRequestId: string | null;
+  executedAt: string;
+}): JiraV2SideEffectLedgerEntry =>
+  JiraV2SideEffectLedgerEntrySchema.parse({
+    ...entry,
+    status: 'dispatched',
+    external_request_id: externalRequestId,
+    executed_at: executedAt,
+  });
+
+export const finalizeJiraV2Entry = ({
+  entry,
+  resultRef,
+  result,
+  executedAt,
+  status = 'succeeded',
+}: {
+  entry: JiraV2SideEffectLedgerEntry;
+  resultRef: string | null;
+  result: JiraSubtaskResult | JiraBindingResult;
+  executedAt: string;
+  status?: 'succeeded' | 'failed' | 'outcome_unknown';
+}): JiraV2SideEffectLedgerEntry =>
+  JiraV2SideEffectLedgerEntrySchema.parse({
+    ...entry,
+    result_ref: resultRef,
+    status,
+    already_applied: result.already_applied,
+    external_request_id: result.external_request_id,
+    executed_at: executedAt,
+  });
+
+export const planJiraV2Execution = ({
+  draft,
+  dryRun,
+  latestEntry,
+}: {
+  draft: JiraSubtaskDraft | JiraBindingDraft;
+  dryRun: boolean;
+  latestEntry: JiraV2SideEffectLedgerEntry | null;
+}):
+  | {
+      action: 'preview_only' | 'execute' | 'skip_terminal';
+      reason: 'dry_run_preview_only' | 'ready_to_execute' | 'terminal_side_effect_present';
+      requestPayload: JiraSubtaskDraft['request_payload'] | JiraBindingDraft['request_payload'];
+      requestPayloadHash: string;
+    }
+  | {
+      action: 'reconcile_before_retry';
+      reason:
+        | 'prepared_side_effect_present'
+        | 'dispatched_side_effect_present'
+        | 'write_outcome_unknown';
+      requestPayload: JiraSubtaskDraft['request_payload'] | JiraBindingDraft['request_payload'];
+      requestPayloadHash: string;
+    } => {
+  const baseline = {
+    requestPayload: draft.request_payload,
+    requestPayloadHash: draft.request_payload_hash,
+  } as const;
+
+  if (latestEntry?.status === 'prepared') {
+    return {
+      action: 'reconcile_before_retry',
+      reason: 'prepared_side_effect_present',
+      ...baseline,
+    };
+  }
+
+  if (latestEntry?.status === 'dispatched') {
+    return {
+      action: 'reconcile_before_retry',
+      reason: 'dispatched_side_effect_present',
+      ...baseline,
+    };
+  }
+
+  if (latestEntry?.status === 'outcome_unknown') {
+    return {
+      action: 'reconcile_before_retry',
+      reason: 'write_outcome_unknown',
+      ...baseline,
+    };
+  }
+
+  if (
+    latestEntry &&
+    (latestEntry.status === 'succeeded' || latestEntry.already_applied)
+  ) {
+    return {
+      action: 'skip_terminal',
+      reason: 'terminal_side_effect_present',
+      ...baseline,
+    };
+  }
+
+  if (dryRun) {
+    return {
+      action: 'preview_only',
+      reason: 'dry_run_preview_only',
+      ...baseline,
+    };
+  }
+
+  return {
+    action: 'execute',
+    reason: 'ready_to_execute',
+    ...baseline,
   };
 };

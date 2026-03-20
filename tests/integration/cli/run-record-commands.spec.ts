@@ -121,6 +121,34 @@ const seedCompleteProjectProfile = async (homeDir: string, projectId = 'proj-a')
   );
 };
 
+const seedJiraIssueFixture = async (homeDir: string, issueKey: string) => {
+  const fixturePath = path.join(
+    homeDir,
+    '.local',
+    'share',
+    'bugfix-orchestrator',
+    'fixtures',
+    'jira',
+    'issues',
+    `${issueKey}.json`,
+  );
+
+  await writeJsonAtomically(fixturePath, {
+    issue_key: issueKey,
+    issue_id: `id-${issueKey}`,
+    issue_type_id: '10001',
+    project_key: 'BUG',
+    summary: `Summary for ${issueKey}`,
+    description: `Description for ${issueKey}`,
+    status_name: 'In Progress',
+    labels: ['bug', 'module:api'],
+    requirement_sources: {
+      issue_link: ['REQ-100'],
+    },
+    source_url: `https://jira.example.com/browse/${issueKey}`,
+  });
+};
+
 describe('CLI run and record commands', () => {
   it('exposes the required run and record command groups without invalid shortcut aliases', () => {
     const collector = createOutputCollector();
@@ -159,6 +187,7 @@ describe('CLI run and record commands', () => {
   it('creates brief-only and jira-writeback-only runs without bypassing shared workflow state', async () => {
     const fakeHome = await mkdtemp(path.join(tmpdir(), 'bfo-cli-run-record-'));
     await seedCompleteProjectProfile(fakeHome);
+    await seedJiraIssueFixture(fakeHome, 'BUG-123');
     const collector = createOutputCollector();
     const program = bootstrapCli({
       io: collector.io,
@@ -334,6 +363,7 @@ describe('CLI run and record commands', () => {
     ).rejects.toMatchObject({ code: 'ENOENT' });
 
     await writeJsonAtomically(storedProfilePath, createCompleteProjectProfile());
+    await seedJiraIssueFixture(fakeHome, 'BUG-100');
     collector.reset();
 
     await program.parseAsync([
@@ -363,9 +393,64 @@ describe('CLI run and record commands', () => {
     expect(repairedContext.config_version).toBe('2026-03-19');
   });
 
+  it('persists the Jira snapshot as an Intake artifact when a run starts from an issue key', async () => {
+    const fakeHome = await mkdtemp(path.join(tmpdir(), 'bfo-cli-jira-snapshot-'));
+    await seedCompleteProjectProfile(fakeHome);
+    await seedJiraIssueFixture(fakeHome, 'BUG-120');
+    const collector = createOutputCollector();
+    const program = bootstrapCli({
+      io: collector.io,
+      env: {
+        ...process.env,
+        BUGFIX_ORCHESTRATOR_HOME: fakeHome,
+      },
+    });
+
+    await program.parseAsync([
+      'node',
+      'bugfix-orchestrator',
+      'run',
+      'start',
+      '--project',
+      'proj-a',
+      '--issue',
+      'BUG-120',
+      '--json',
+    ]);
+
+    const output = JSON.parse(collector.getStdout().trim());
+    const runPaths = getRunPaths(output.runId, fakeHome);
+    const context = JSON.parse(await readFile(runPaths.contextFile, 'utf8'));
+    const artifactPath = path.join(
+      runPaths.artifactsDir,
+      'jira-issue-snapshot-BUG-120.json',
+    );
+    const snapshot = JSON.parse(await readFile(artifactPath, 'utf8'));
+
+    expect(output).toMatchObject({
+      command: 'run start',
+      exitCode: 0,
+      currentStage: 'Intake',
+    });
+    expect(context).toMatchObject({
+      active_bug_issue_key: 'BUG-120',
+      jira_issue_snapshot_ref: 'artifact://jira/issues/BUG-120',
+      stage_artifact_refs: {
+        Intake: ['artifact://jira/issues/BUG-120'],
+      },
+    });
+    expect(snapshot).toMatchObject({
+      issue_key: 'BUG-120',
+      status_name: 'In Progress',
+      description: 'Description for BUG-120',
+      labels: ['bug', 'module:api'],
+    });
+  });
+
   it('surfaces shared recovery and status semantics for record runs', async () => {
     const fakeHome = await mkdtemp(path.join(tmpdir(), 'bfo-cli-run-status-'));
     await seedCompleteProjectProfile(fakeHome);
+    await seedJiraIssueFixture(fakeHome, 'BUG-456');
     const collector = createOutputCollector();
     const program = bootstrapCli({
       io: collector.io,
@@ -440,6 +525,7 @@ describe('CLI run and record commands', () => {
   it('records a bound branch as Execution input and keeps the run waiting for the remaining inputs', async () => {
     const fakeHome = await mkdtemp(path.join(tmpdir(), 'bfo-cli-bind-branch-'));
     await seedCompleteProjectProfile(fakeHome);
+    await seedJiraIssueFixture(fakeHome, 'BUG-789');
     const collector = createOutputCollector();
     const program = bootstrapCli({
       io: collector.io,
@@ -519,6 +605,7 @@ describe('CLI run and record commands', () => {
   it('requires Execution inputs before ensure-subtask can generate an Artifact Linking preview', async () => {
     const fakeHome = await mkdtemp(path.join(tmpdir(), 'bfo-cli-ensure-subtask-'));
     await seedCompleteProjectProfile(fakeHome);
+    await seedJiraIssueFixture(fakeHome, 'BUG-810');
     const fixtureDir = await mkdtemp(path.join(tmpdir(), 'bfo-cli-ensure-subtask-fixtures-'));
     const collector = createOutputCollector();
     const program = bootstrapCli({
@@ -670,6 +757,7 @@ describe('CLI run and record commands', () => {
   it('records fix commit ownership and resets Artifact Linking to regenerate preview', async () => {
     const fakeHome = await mkdtemp(path.join(tmpdir(), 'bfo-cli-fix-commit-'));
     await seedCompleteProjectProfile(fakeHome);
+    await seedJiraIssueFixture(fakeHome, 'BUG-811');
     const fixtureDir = await mkdtemp(path.join(tmpdir(), 'bfo-cli-fix-commit-fixtures-'));
     const collector = createOutputCollector();
     const program = bootstrapCli({

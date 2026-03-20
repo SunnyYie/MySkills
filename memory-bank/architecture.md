@@ -1,5 +1,145 @@
 # Architecture Notes
 
+## v2 任务 6 步骤 4 当前 Jira 读取错误收敛层
+
+到步骤 3 为止，Jira 读取成功路径已经成立，但失败路径还不可靠：权限问题会直接冒出原生异常，fixture 缺失和未来 transport 404 也没有统一归类，字段缺失甚至可能演化成 `TypeError`。如果不把这些错误收敛在 connector，后续 app、workflow 和 CLI 都会被迫知道底层 transport 的细节。
+
+## 新增/调整文件职责
+
+### `src/infrastructure/connectors/jira/index.ts`
+
+- `readJiraIssueSnapshot()` 现在除了负责读取成功路径，也成为 Jira 读取失败的唯一收口点。
+- 新增三类判断逻辑：
+  - transport 权限错误识别
+  - transport not found / network 错误识别
+  - 原始 Jira payload 关键字段完整性检查
+- 新增或收敛以下结构化错误构造函数：
+  - `createJiraPermissionDeniedError()`
+  - `createJiraIssueNotFoundError()`
+  - `createInvalidJiraIssueError()`
+  - `createJiraNetworkError()`
+- 这个文件现在真正同时承载了：
+  - Jira 读取入口
+  - 结构化 snapshot 映射
+  - Intake 读取失败语义标准化
+
+### `tests/unit/intake/jira-intake.spec.ts`
+
+- 新增表征型测试把四种失败都锁到 connector 边界，而不是散落在 app 或 CLI 层测试中。
+- 它现在明确保护：
+  - 403 / 权限失败不会再泄漏成原生异常
+  - 404 / 缺失 issue 会形成稳定 `jira_issue_not_found`
+  - 空字段 payload 会形成稳定 `jira_issue_invalid`
+  - 网络错误会形成 retryable 的 `jira_network_error`
+
+## 任务 6 步骤 4 架构洞察
+
+- 让 `readJiraIssueSnapshot()` 成为失败语义唯一 owner，是任务 6 收口最重要的一步。读取 transport 未来可以从文件换成 HTTP，但 app 层看到的依然应是同一组 `StructuredError`。
+
+- “找不到 issue” 被收敛成专门的 code，而不是和“字段缺失”混在一起，能让后续 CLI 给出更准确的 next action：前者更像 issue key / 可见性问题，后者更像 connector payload 映射问题。
+
+- 在 connector 内先做最小字段完整性检查，再进入 `buildJiraIssueSnapshot()`，避免了外部系统数据问题演化成 JavaScript 运行时异常。这让 `Intake` 的事实源不仅“存在”，而且“语义可控”。
+
+## v2 任务 6 步骤 3 当前 `jira-intake` artifact 边界层
+
+步骤 2 之后，run 已经能拥有真实的 Jira snapshot artifact，但 skill 层还没有一个明确的入口去声明“我消费的是 artifact 里的结构化快照，而不是任何长得像 Jira issue 的对象”。如果不把这层边界显式化，后续 app 或 workflow 很容易再次把 raw Jira payload 直接塞进 `jira-intake`。
+
+## 新增/调整文件职责
+
+### `src/skills/jira-intake/index.ts`
+
+- 这一轮新增 `loadJiraIssueSnapshotArtifact()`，专门负责把未知输入收敛到 `JiraIssueSnapshotSchema`。
+- 新增 `runJiraIntakeFromArtifact()`，把“读取结构化 snapshot artifact”与“生成 Intake 阶段结果”组合成 skill 层入口。
+- 原有 `runJiraIntake()` 继续保持纯粹：
+  - 不读文件
+  - 不访问 Jira
+  - 只处理已经标准化的 `issueSnapshot`
+
+### `tests/unit/intake/jira-intake.spec.ts`
+
+- 新增断言开始保护一个更细的架构事实：不是所有 Jira 风格对象都能进入 skill。
+- 测试现在显式验证：
+  - 结构化 snapshot artifact 可以被 `jira-intake` 消费
+  - 缺少 `requirement_hints` / `writeback_targets` 等标准字段的 raw payload 会被 schema 边界拒绝
+
+## 任务 6 步骤 3 架构洞察
+
+- `loadJiraIssueSnapshotArtifact()` 的意义不在于“多包一层 parse”，而在于给 skill 层建立了一个正式入口：外部世界给 `jira-intake` 的，只能是符合 snapshot contract 的 artifact 内容。
+
+- `runJiraIntakeFromArtifact()` 与 `runJiraIntake()` 分离，说明“artifact 边界”和“业务推理”是两层职责。前者负责验证输入是不是标准快照，后者负责从快照提炼 Intake 结果。
+
+- 这一步也为任务 7 留下了清晰装配点：未来主流程只需要把 artifact 内容交给 `runJiraIntakeFromArtifact()`，而不必让 workflow 理解 raw Jira 字段，更不必让 skill 反向依赖 connector。
+
+## v2 任务 6 步骤 2 当前 Jira snapshot artifact 接线层
+
+步骤 1 只解决了“connector 能不能按 `issue_key` 读到结构化快照”，但如果 app 层仍然只是把一个占位字符串写进 `jira_issue_snapshot_ref`，那后续 `Intake`、恢复、审计和写回链路依然没有真实事实源。步骤 2 的核心是把“读到的快照”真正变成 run 内可追踪、可恢复的 artifact。
+
+## 新增/调整文件职责
+
+### `src/app/cli-orchestration.ts`
+
+- 这一轮它新增了承上启下的职责：在 `createCliRun()` 中把 project profile、Jira 读取入口和 run 存储连接起来。
+- `persistJiraIssueSnapshotArtifact()` 负责两件事：
+  - 把结构化 snapshot 写进当前 run 的 `artifacts/`
+  - 固定外部引用为 `artifact://jira/issues/<issue_key>`
+- `createCliRun()` 现在不再把 `jira_issue_snapshot_ref` 当作占位字段，而是会在 run 初始化后立即：
+  - 读取 Jira snapshot
+  - 持久化 artifact
+  - 回填 `active_bug_issue_key`
+  - 把 `stage_artifact_refs.Intake` 指向该 snapshot ref
+
+### `tests/integration/cli/run-record-commands.spec.ts`
+
+- 这组测试开始保护任务 6 的第一个真正 app 级行为：`run start` 不能只创建 run，还必须同步落下可恢复的 Jira snapshot artifact。
+- 新断言明确验证：
+  - artifact 文件真的存在于 run 目录
+  - context 里的 snapshot ref 使用统一的 `artifact://jira/issues/<key>` 口径
+  - `Intake` 已经能通过 `stage_artifact_refs` 找到事实源
+
+### `tests/integration/cli/writeback-flows.spec.ts`
+
+- 这组测试新增 Jira issue fixture 后，开始显式表明一件事：即便是 `record jira` 这样的子工作流入口，也不再绕过 Jira snapshot 读取链路。
+- 这让写回-only 模式与主流程模式在“bug 事实源来自哪里”这个问题上重新对齐。
+
+## 任务 6 步骤 2 架构洞察
+
+- 让 `createCliRun()` 负责“读取后立刻持久化”，而不是让 `initializeRun()` 自己去读 Jira，是一个很重要的分层选择。`initializeRun()` 仍然只是 run lifecycle 的持久化器；外部系统读取与 artifact 落盘仍然由 app 层装配。
+
+- `jira_issue_snapshot_ref` 改成 `artifact://jira/issues/<key>` 后，context 终于表达的是“真实事实源在哪里”，而不是“用户当时输入了什么”。这对恢复和审计都比单纯保存 issue key 更可靠。
+
+- `stage_artifact_refs.Intake` 在 run 初始化时就挂上 snapshot ref，意味着 Intake 的输入事实已经先于阶段执行被稳定化。后续步骤 3 可以直接围绕这个 artifact 边界收敛 `jira-intake` 的输入，而不必再反向推断 raw issue。
+
+## v2 任务 6 步骤 1 当前 Jira Intake 读取入口层
+
+在这一步之前，仓库里虽然已经有 `buildJiraIssueSnapshot()` 这种“把原始 Jira 数据映射成结构化快照”的纯函数，但没有任何正式的“读取入口”。这意味着 app 层如果要进入任务 6，只能自己决定从哪里拿 Jira 数据，最终会把 connector 退化成一组零散 helper，而不是统一的外部系统入口。
+
+## 新增/调整文件职责
+
+### `src/infrastructure/connectors/jira/index.ts`
+
+- 本轮新增 `readJiraIssueSnapshot()`，把“按 `issue_key` 读取 Jira bug 并得到结构化快照”正式收敛成 connector 能力。
+- 这个入口当前只做两件事：
+  - 调用底层 `fetchIssue()` 读取原始 Jira issue
+  - 把原始结果立刻交给 `buildJiraIssueSnapshot()`，输出标准化 `JiraIssueSnapshot`
+- 这样同一个文件现在同时承载两层职责：
+  - 纯映射：`buildJiraIssueSnapshot()`
+  - 读取入口：`readJiraIssueSnapshot()`
+
+### `tests/unit/intake/jira-intake.spec.ts`
+
+- 新增测试不再只验证“给我一个 raw issue，我能不能变成快照”，而是开始验证“connector 有没有真正的读取入口”。
+- 这组断言现在会锁定两件关键事实：
+  - 读取必须显式按 `issue_key` 发起
+  - Intake 需要的状态、描述、标签、requirement hints 和 writeback targets，最终都来自结构化快照
+
+## 任务 6 步骤 1 架构洞察
+
+- 把 `readJiraIssueSnapshot()` 放在 connector，而不是直接加进 `jira-intake` skill，是这一步最重要的边界选择。skill 应该只关心“已经标准化的事实怎么被消费”，不应该同时承担外部 I/O 和业务解析。
+
+- 读取入口显式依赖 `fetchIssue()`，说明这一步先冻结的是“能力边界”，不是某个具体传输实现。后续无论底层是 HTTP、测试桩还是别的 transport，app 层都只需要知道 connector 会返回标准 `JiraIssueSnapshot`。
+
+- 现在 connector 开始同时暴露“读取入口”和“映射 helper”，为步骤 2 的 artifact 落盘创造了稳定上游：app 层不再需要猜测 raw issue 字段，只需要消费统一的快照对象并决定如何持久化。
+
 ## v2 任务 5 当前项目画像入口闸门层
 
 任务 5 的关键不是“让 workflow 知道更多配置”，而是先把一个更基础的架构漏洞堵住：在这之前，`run start` / `run brief` / `record jira` / `record feishu` 即使完全没有项目画像，也能先创建 run，再把后续失败留给更深层的流程。这会制造没有可信配置来源的空壳 run，破坏 `ProjectProfile` 作为唯一可信配置来源的设计前提。

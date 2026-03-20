@@ -43,6 +43,12 @@ type RawJiraIssue = {
   source_url?: string;
 };
 
+type JiraIssueFetcher = (issueKey: string) => Promise<RawJiraIssue>;
+
+type ConnectorErrorLike = NodeJS.ErrnoException & {
+  status?: number;
+};
+
 const REQUIREMENT_SOURCE_FIELDS = {
   issue_link: 'jira.issue_link',
   custom_field: 'jira.custom_field',
@@ -66,6 +72,48 @@ const uniquePreservingOrder = (values: string[] = []) => {
   }
 
   return normalized;
+};
+
+const REQUIRED_RAW_ISSUE_FIELDS = [
+  'issue_key',
+  'issue_id',
+  'issue_type_id',
+  'project_key',
+  'summary',
+  'description',
+  'status_name',
+] as const;
+
+const isStructuredError = (error: unknown): error is StructuredError =>
+  StructuredErrorSchema.safeParse(error).success;
+
+const isPermissionReadError = (error: ConnectorErrorLike) =>
+  error.status === 401 ||
+  error.status === 403 ||
+  error.code === 'EACCES' ||
+  error.code === 'EPERM';
+
+const isIssueNotFoundError = (error: ConnectorErrorLike) =>
+  error.status === 404 || error.code === 'ENOENT';
+
+const isNetworkReadError = (error: ConnectorErrorLike) =>
+  error.code === 'ECONNRESET' ||
+  error.code === 'ECONNREFUSED' ||
+  error.code === 'ETIMEDOUT' ||
+  error.code === 'ENOTFOUND' ||
+  error.code === 'EAI_AGAIN';
+
+const getInvalidRawIssueDetail = (rawIssue: RawJiraIssue) => {
+  const invalidFields = REQUIRED_RAW_ISSUE_FIELDS.filter((field) => {
+    const value = rawIssue[field];
+    return typeof value !== 'string' || value.trim().length === 0;
+  });
+
+  if (invalidFields.length === 0) {
+    return null;
+  }
+
+  return `Missing or empty Jira issue fields: ${invalidFields.join(', ')}.`;
 };
 
 const mapWritebackTarget = (target: string) =>
@@ -355,6 +403,74 @@ export const buildJiraIssueSnapshot = ({
     requirement_hints: requirementHints,
     writeback_targets: projectProfile.jira.writeback_targets.map(mapWritebackTarget),
   });
+};
+
+export const readJiraIssueSnapshot = async ({
+  projectProfile,
+  issueKey,
+  fetchIssue,
+}: {
+  projectProfile: ProjectProfile;
+  issueKey: string;
+  fetchIssue: JiraIssueFetcher;
+}): Promise<JiraIssueSnapshot> => {
+  const normalizedIssueKey = issueKey.trim();
+  const timestamp = new Date().toISOString();
+
+  try {
+    const rawIssue = await fetchIssue(normalizedIssueKey);
+    const invalidDetail = getInvalidRawIssueDetail(rawIssue);
+
+    if (invalidDetail) {
+      throw createInvalidJiraIssueError({
+        issueKey: normalizedIssueKey,
+        detail: invalidDetail,
+        timestamp,
+      });
+    }
+
+    return buildJiraIssueSnapshot({
+      projectProfile,
+      rawIssue,
+    });
+  } catch (error) {
+    if (isStructuredError(error)) {
+      throw error;
+    }
+
+    const connectorError = error as ConnectorErrorLike;
+
+    if (isPermissionReadError(connectorError)) {
+      throw createJiraPermissionDeniedError({
+        issueKey: normalizedIssueKey,
+        timestamp,
+      });
+    }
+
+    if (isIssueNotFoundError(connectorError)) {
+      throw createJiraIssueNotFoundError({
+        issueKey: normalizedIssueKey,
+        timestamp,
+      });
+    }
+
+    if (isNetworkReadError(connectorError)) {
+      throw createJiraNetworkError({
+        issueKey: normalizedIssueKey,
+        detail: connectorError.message,
+        timestamp,
+      });
+    }
+
+    throw createInvalidJiraIssueError({
+      issueKey: normalizedIssueKey,
+      detail:
+        error instanceof Error
+          ? error.message
+          : 'Jira issue payload could not be normalized.',
+      timestamp,
+    });
+  }
 };
 
 export const buildJiraWritebackPreviewDraft = ({
@@ -858,6 +974,58 @@ export const createInvalidJiraIssueError = ({
     outcome_unknown: false,
     user_action:
       'Inspect the Jira issue payload mapping and confirm the issue belongs to the configured Jira project and issue type.',
+    raw_cause_ref: null,
+    partial_state_ref: null,
+    timestamp,
+  });
+
+export const createJiraIssueNotFoundError = ({
+  issueKey,
+  timestamp,
+}: {
+  issueKey: string;
+  timestamp: string;
+}): StructuredError =>
+  StructuredErrorSchema.parse({
+    code: 'jira_issue_not_found',
+    category: 'validation_error',
+    stage: 'Intake',
+    system: 'jira',
+    operation: 'read_issue',
+    target_ref: `jira:${issueKey}`,
+    message: `Jira issue ${issueKey} does not exist or is not visible to the current project configuration.`,
+    detail: null,
+    retryable: false,
+    outcome_unknown: false,
+    user_action:
+      'Confirm the issue key is correct and that it belongs to the configured Jira project, then retry the Intake stage.',
+    raw_cause_ref: null,
+    partial_state_ref: null,
+    timestamp,
+  });
+
+export const createJiraNetworkError = ({
+  issueKey,
+  detail,
+  timestamp,
+}: {
+  issueKey: string;
+  detail: string | null;
+  timestamp: string;
+}): StructuredError =>
+  StructuredErrorSchema.parse({
+    code: 'jira_network_error',
+    category: 'network_error',
+    stage: 'Intake',
+    system: 'jira',
+    operation: 'read_issue',
+    target_ref: `jira:${issueKey}`,
+    message: `Jira issue ${issueKey} could not be read because the connector transport failed.`,
+    detail,
+    retryable: true,
+    outcome_unknown: false,
+    user_action:
+      'Retry when the Jira connector transport is healthy, or verify the connector network path before retrying.',
     raw_cause_ref: null,
     partial_state_ref: null,
     timestamp,

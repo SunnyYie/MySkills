@@ -100,10 +100,10 @@ describe('execution external inputs', () => {
     expect(getExecutionExternalInputState(createContext())).toEqual({
       stageStatus: 'waiting_external_input',
       runLifecycleStatus: 'waiting_external_input',
-      waitingReason: 'gitlab_artifacts,verification_results',
-      missingInputs: ['gitlab_artifacts', 'verification_results'],
+      waitingReason: 'gitlab_artifacts,verification_results,branch_binding',
+      missingInputs: ['gitlab_artifacts', 'verification_results', 'branch_binding'],
       summary:
-        'Execution is waiting for GitLab artifacts and verification results before downstream writeback can start.',
+        'Execution is waiting for GitLab artifacts, verification results, and a bound development branch before downstream writeback can start.',
     });
   });
 
@@ -111,10 +111,17 @@ describe('execution external inputs', () => {
     const onlyArtifactsMissing = {
       ...createContext(),
       verification_results_ref: 'artifact://verification/results-v1',
+      git_branch_binding_ref: 'artifact://jira/bindings/branch/BUG-123-branch',
     };
     const onlyVerificationMissing = {
       ...createContext(),
       gitlab_artifacts: createArtifacts(),
+      git_branch_binding_ref: 'artifact://jira/bindings/branch/BUG-123-branch',
+    };
+    const onlyBranchMissing = {
+      ...createContext(),
+      gitlab_artifacts: createArtifacts(),
+      verification_results_ref: 'artifact://verification/results-v1',
     };
 
     expect(getExecutionExternalInputState(onlyArtifactsMissing)).toMatchObject({
@@ -124,6 +131,10 @@ describe('execution external inputs', () => {
     expect(getExecutionExternalInputState(onlyVerificationMissing)).toMatchObject({
       waitingReason: 'verification_results',
       missingInputs: ['verification_results'],
+    });
+    expect(getExecutionExternalInputState(onlyBranchMissing)).toMatchObject({
+      waitingReason: 'branch_binding',
+      missingInputs: ['branch_binding'],
     });
   });
 
@@ -151,9 +162,22 @@ describe('execution external inputs', () => {
     expect(secondUpdate.context.verification_results_ref).toBe(
       'artifact://verification/results-v2',
     );
-    expect(secondUpdate.context.stage_status_map.Execution).toBe('completed');
-    expect(secondUpdate.state.stageStatus).toBe('completed');
-    expect(secondUpdate.state.missingInputs).toEqual([]);
+    expect(secondUpdate.context.stage_status_map.Execution).toBe('waiting_external_input');
+    expect(secondUpdate.state.stageStatus).toBe('waiting_external_input');
+    expect(secondUpdate.state.missingInputs).toEqual(['branch_binding']);
+
+    const thirdUpdate = recordExecutionExternalInputs({
+      context: {
+        ...secondUpdate.context,
+        git_branch_binding_ref: 'artifact://jira/bindings/branch/BUG-123-branch',
+      },
+      updatedAt: '2026-03-19T12:13:00.000Z',
+    });
+
+    expect(thirdUpdate.accepted).toBe(true);
+    expect(thirdUpdate.context.stage_status_map.Execution).toBe('completed');
+    expect(thirdUpdate.state.stageStatus).toBe('completed');
+    expect(thirdUpdate.state.missingInputs).toEqual([]);
   });
 
   it('rejects conflicting repeated GitLab artifacts without mutating the current effective state', () => {

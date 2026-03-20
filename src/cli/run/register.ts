@@ -2,11 +2,14 @@ import { Command } from 'commander';
 
 import {
   approveCliRunStage,
+  bindCliRunBranch,
   createCliRun,
+  ensureCliSubtask,
   executeCliWrite,
   getCliRunStatus,
   previewCliWrite,
   provideCliArtifacts,
+  provideCliFixCommit,
   provideCliVerification,
   rejectCliRunStage,
   resumeCliRun,
@@ -242,6 +245,108 @@ export const registerRunCommands = (
           const payload = await reviseCliRun({
             runId: options.run,
             rollbackToStage: options.rollbackTo as (typeof BUGFIX_STAGES)[number],
+            homeDir: runtime.homeDir,
+            dryRun: Boolean(options.dryRun),
+            nonInteractive: Boolean(options.nonInteractive),
+          });
+
+          await emitCliPayload({
+            runtime,
+            payload,
+            asJson: Boolean(options.json),
+            outputPath: options.output,
+          });
+        },
+      ),
+  );
+
+  addSharedOptions(
+    run
+      .command('bind-branch')
+      .requiredOption('--run <id>', 'run id')
+      .requiredOption('--branch <name>', 'development branch name')
+      .option('--issue <key>', 'explicit issue key override')
+      .action(
+        async (options: {
+          run: string;
+          branch: string;
+          issue?: string;
+          json?: boolean;
+          dryRun?: boolean;
+          nonInteractive?: boolean;
+          output?: string;
+        }) => {
+          const payload = await bindCliRunBranch({
+            runId: options.run,
+            branchName: options.branch,
+            issueKey: options.issue,
+            homeDir: runtime.homeDir,
+            dryRun: Boolean(options.dryRun),
+            nonInteractive: Boolean(options.nonInteractive),
+          });
+
+          await emitCliPayload({
+            runtime,
+            payload,
+            asJson: Boolean(options.json),
+            outputPath: options.output,
+          });
+        },
+      ),
+  );
+
+  addSharedOptions(
+    run
+      .command('ensure-subtask')
+      .requiredOption('--run <id>', 'run id')
+      .option('--issue <key>', 'explicit issue key override')
+      .action(
+        async (options: {
+          run: string;
+          issue?: string;
+          json?: boolean;
+          dryRun?: boolean;
+          nonInteractive?: boolean;
+          output?: string;
+        }) => {
+          const payload = await ensureCliSubtask({
+            runId: options.run,
+            issueKey: options.issue,
+            homeDir: runtime.homeDir,
+            dryRun: Boolean(options.dryRun),
+            nonInteractive: Boolean(options.nonInteractive),
+          });
+
+          await emitCliPayload({
+            runtime,
+            payload,
+            asJson: Boolean(options.json),
+            outputPath: options.output,
+          });
+        },
+      ),
+  );
+
+  addSharedOptions(
+    run
+      .command('provide-fix-commit')
+      .requiredOption('--run <id>', 'run id')
+      .requiredOption('--issue <key>', 'target issue key')
+      .requiredOption('--commit <sha>', 'fix commit sha')
+      .action(
+        async (options: {
+          run: string;
+          issue: string;
+          commit: string;
+          json?: boolean;
+          dryRun?: boolean;
+          nonInteractive?: boolean;
+          output?: string;
+        }) => {
+          const payload = await provideCliFixCommit({
+            runId: options.run,
+            issueKey: options.issue,
+            commitSha: options.commit,
             homeDir: runtime.homeDir,
             dryRun: Boolean(options.dryRun),
             nonInteractive: Boolean(options.nonInteractive),

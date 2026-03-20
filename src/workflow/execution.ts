@@ -4,7 +4,10 @@ import {
   type StructuredError,
 } from '../domain/index.js';
 
-type ExecutionExternalInputKey = 'gitlab_artifacts' | 'verification_results';
+type ExecutionExternalInputKey =
+  | 'gitlab_artifacts'
+  | 'verification_results'
+  | 'branch_binding';
 
 type ExecutionExternalInputState = {
   stageStatus: 'waiting_external_input' | 'completed';
@@ -19,6 +22,7 @@ type RecordExecutionExternalInputsInput = {
   updatedAt: string;
   gitlabArtifacts?: GitLabArtifact[];
   verificationResultsRef?: string | null;
+  branchBindingRef?: string | null;
 };
 
 type RecordExecutionExternalInputsResult = {
@@ -67,7 +71,10 @@ const buildConflictError = (
 });
 
 const getMissingExecutionInputs = (
-  context: Pick<ExecutionContext, 'gitlab_artifacts' | 'verification_results_ref'>,
+  context: Pick<
+    ExecutionContext,
+    'gitlab_artifacts' | 'verification_results_ref' | 'git_branch_binding_ref'
+  >,
 ): ExecutionExternalInputKey[] => {
   const missing: ExecutionExternalInputKey[] = [];
 
@@ -77,6 +84,10 @@ const getMissingExecutionInputs = (
 
   if (!context.verification_results_ref) {
     missing.push('verification_results');
+  }
+
+  if (!context.git_branch_binding_ref) {
+    missing.push('branch_binding');
   }
 
   return missing;
@@ -89,15 +100,43 @@ const buildExecutionWaitingSummary = (
     return 'Execution has received the required GitLab artifacts and verification results.';
   }
 
-  if (missingInputs.length === 2) {
+  if (missingInputs.length === 3) {
+    return 'Execution is waiting for GitLab artifacts, verification results, and a bound development branch before downstream writeback can start.';
+  }
+
+  if (
+    missingInputs.length === 2 &&
+    missingInputs.includes('gitlab_artifacts') &&
+    missingInputs.includes('verification_results')
+  ) {
     return 'Execution is waiting for GitLab artifacts and verification results before downstream writeback can start.';
+  }
+
+  if (
+    missingInputs.length === 2 &&
+    missingInputs.includes('gitlab_artifacts') &&
+    missingInputs.includes('branch_binding')
+  ) {
+    return 'Execution is waiting for GitLab artifacts and a bound development branch before downstream writeback can start.';
+  }
+
+  if (
+    missingInputs.length === 2 &&
+    missingInputs.includes('verification_results') &&
+    missingInputs.includes('branch_binding')
+  ) {
+    return 'Execution is waiting for verification results and a bound development branch before downstream writeback can start.';
   }
 
   if (missingInputs[0] === 'gitlab_artifacts') {
     return 'Execution is waiting for GitLab artifacts before downstream writeback can start.';
   }
 
-  return 'Execution is waiting for verification results before downstream writeback can start.';
+  if (missingInputs[0] === 'verification_results') {
+    return 'Execution is waiting for verification results before downstream writeback can start.';
+  }
+
+  return 'Execution is waiting for a bound development branch before downstream writeback can start.';
 };
 
 const mergeGitLabArtifacts = ({
@@ -137,7 +176,10 @@ const mergeGitLabArtifacts = ({
 };
 
 export const getExecutionExternalInputState = (
-  context: Pick<ExecutionContext, 'gitlab_artifacts' | 'verification_results_ref'>,
+  context: Pick<
+    ExecutionContext,
+    'gitlab_artifacts' | 'verification_results_ref' | 'git_branch_binding_ref'
+  >,
 ): ExecutionExternalInputState => {
   const missingInputs = getMissingExecutionInputs(context);
 
@@ -165,8 +207,10 @@ export const recordExecutionExternalInputs = ({
   updatedAt,
   gitlabArtifacts = [],
   verificationResultsRef,
+  branchBindingRef,
 }: RecordExecutionExternalInputsInput): RecordExecutionExternalInputsResult => {
   const normalizedVerificationResultsRef = verificationResultsRef?.trim() || null;
+  const normalizedBranchBindingRef = branchBindingRef?.trim() || null;
   const mergedArtifacts = mergeGitLabArtifacts({
     existingArtifacts: context.gitlab_artifacts,
     incomingArtifacts: gitlabArtifacts,
@@ -190,6 +234,8 @@ export const recordExecutionExternalInputs = ({
     gitlab_artifacts: mergedArtifacts.mergedArtifacts,
     verification_results_ref:
       normalizedVerificationResultsRef ?? context.verification_results_ref,
+    git_branch_binding_ref:
+      normalizedBranchBindingRef ?? context.git_branch_binding_ref,
     stage_status_map: {
       ...context.stage_status_map,
     },

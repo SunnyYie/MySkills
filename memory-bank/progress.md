@@ -1,5 +1,202 @@
 # Progress
 
+## 2026-03-20 - v2 任务 3 步骤 4：收敛三条入口的 workflow 状态语义与 status 引导
+
+### 本轮完成内容
+
+- 在 `src/app/cli-orchestration.ts` 中收紧 `run status` 的允许动作生成逻辑：
+  - `Execution` 处于 `waiting_external_input` 时，不再一律展示所有补录命令
+  - 现在会根据实际缺失的输入，只提示：
+    - 缺 branch 时显示 `run bind-branch`
+    - 缺 artifact 时显示 `run provide-artifact`
+    - 缺 verification 时显示 `run provide-verification`
+- 保持 `Artifact Linking` 阶段的可执行动作与新入口一致：
+  - `run provide-fix-commit` 现在会作为 `Artifact Linking` 的稳定补录动作出现在 status 中
+  - 补录 commit 后，`run status` 会引导用户重新 `preview-write`，而不是继续批准旧 preview
+- 在测试侧补齐步骤 4 的状态路由覆盖：
+  - `tests/integration/cli/run-record-commands.spec.ts` 现在验证 branch 已补齐后 `run status` 不再误报 `run bind-branch`
+  - 同时验证补录 fix commit 后 `Artifact Linking` 只暴露重新生成 preview 所需动作，而不继续暴露旧审批动作
+
+### 依据
+
+- 用户指令：完成每一步后先测试、验证通过再继续，并在进入下一任务前同步文档。
+- `memory-bank/features/v2/实施计划.md` 任务 3 步骤 4：
+  - 把 `bind-branch`、`ensure-subtask`、`provide-fix-commit` 接到统一 workflow 状态语义中
+  - branch 未提供时 `Execution` 可进入 `waiting_external_input`
+  - branch / commit 关联写回落在 `Artifact Linking`
+  - 不存在绕过 `preview -> approve -> execute` 的旁路
+- `memory-bank/features/v1/需求文档.md` 与 `memory-bank/features/v1/技术方案.md`：
+  - `run status` 应准确表达当前等待原因和下一步可执行动作
+  - 写回输入变化后必须重新回到可审阅、可确认的 preview 链路
+
+### 验证记录
+
+1. 验证对象：`run status` 对 Execution 缺失输入的精确引导
+   触发方式：先修改 `tests/integration/cli/run-record-commands.spec.ts`，再运行 `npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts`
+   预期结果：branch 已绑定后，status 不再提示 `run bind-branch`；仍缺的 artifact / verification 会继续提示
+   实际结果：通过；red 阶段暴露 1 个失败断言，green 后 integration 全量 `12/12` 通过
+
+2. 验证对象：补录 fix commit 后的 Artifact Linking 路由
+   触发方式：继续运行 `npm run test:integration`
+   预期结果：status 提示重新 `preview-write` 与继续 `provide-fix-commit`，但不再提示批准旧 preview
+   实际结果：通过；integration 全量 `12/12` 通过
+
+### 当前边界说明
+
+- 任务 3 到此只完成 CLI 入口与 workflow 路由接线，尚未进入任务 4 的 Jira connector preview / execute / dedupe / reconcile 实现。
+- `run status` 目前只对 `Execution` 缺失输入做精确动作过滤；更细粒度的 `Artifact Linking` 预览内容和 side-effect 账本语义仍等待任务 4 接入。
+- 任务 4 之前，所有 branch / subtask / commit 相关操作都仍然是本地 artifact + context ref 驱动，不产生真实外部写入。
+
+## 2026-03-20 - v2 任务 3 步骤 3：新增 `run provide-fix-commit`，显式补录 commit 归属并重置 Artifact Linking 预览
+
+### 本轮完成内容
+
+- 在 `src/cli/run/register.ts` 中新增 `run provide-fix-commit` 命令，最小输入为：
+  - `--run <id>`
+  - `--issue <key>`
+  - `--commit <sha>`
+- 在 `src/app/cli-orchestration.ts` 中新增 `provideCliFixCommit`，负责：
+  - 校验 `Execution` 已完成，避免在 branch / artifact / verification 未齐时提前补录 commit
+  - 将 fix commit 归属持久化为本地 artifact，并生成 `artifact://jira/bindings/commit/<id>` ref
+  - 把 ref 追加到 `ExecutionContext.git_commit_binding_refs`
+  - 将当前阶段切回 `Artifact Linking/not_started`，清空已有 Jira writeback draft/result，强制后续重新生成 preview
+- 在 `src/app/cli-orchestration.ts` 的状态摘要中补充 `run provide-fix-commit` 作为 `Artifact Linking` 阶段的可执行动作，保证 CLI status 能引导用户继续补录。
+- 在测试侧补齐步骤 3 的红绿覆盖：
+  - `tests/integration/cli/run-record-commands.spec.ts` 锁定新命令曝光、commit 归属写入，以及补录后 `Artifact Linking` 重新回到 `not_started`
+
+### 依据
+
+- 用户指令：继续执行 `memory-bank/features/v2/实施计划.md` 的任务 3；每完成一个步骤先测试，通过后更新文档。
+- `memory-bank/features/v2/实施计划.md` 任务 3 步骤 3：
+  - 新增 `run provide-fix-commit`，用于补录 fix commit 并声明归属 issue
+- `memory-bank/features/v2/实施计划.md` 任务 3 步骤 4：
+  - branch / commit 关联写回落在 `Artifact Linking`
+  - 不允许绕过 preview / approve / execute 的旁路
+- `memory-bank/features/v1/技术方案.md`：
+  - 写回阶段的输入变化后，应通过统一状态机重新生成 preview，而不是沿用陈旧 draft
+
+### 验证记录
+
+1. 验证对象：`run provide-fix-commit` 命令曝光与补录后的阶段回退
+   触发方式：先修改 `tests/integration/cli/run-record-commands.spec.ts`，再运行 `npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts`
+   预期结果：实现前暴露“命令不存在”；实现后能记录 commit 归属 ref，并把 `Artifact Linking` 置回 `not_started`
+   实际结果：通过；red 阶段出现 2 个失败断言，green 后 integration `12/12` 通过
+
+2. 验证对象：TypeScript 类型一致性
+   触发方式：运行 `npm run typecheck`
+   预期结果：新增 commit binding artifact helper、CLI 参数与 orchestration 输出结构在仓库范围内类型一致
+   实际结果：通过；命令退出码为 0
+
+### 当前边界说明
+
+- 当前 `run provide-fix-commit` 只记录“commit 应关联到哪个 issue”的本地 artifact 和 context ref，不执行真实 Jira commit 关联写回。
+- 本步骤只清空 `jira_writeback_draft_ref` / `jira_writeback_result_ref` 并重置 `Artifact Linking` 状态，不扩展 subtask result 或 side-effect ledger 终态；这些仍保留给任务 4。
+- 暂未实现 commit 归属的 dedupe / reconcile 规则；这一步只建立显式入口和安全的 preview 失效机制。
+
+## 2026-03-20 - v2 任务 3 步骤 2：新增 `run ensure-subtask`，把 Jira 子任务预览接到 Artifact Linking
+
+### 本轮完成内容
+
+- 在 `src/cli/run/register.ts` 中新增 `run ensure-subtask` 命令，支持：
+  - `--run <id>`
+  - 可选 `--issue <key>`
+  - 继承既有 `--dry-run`、`--json`、`--non-interactive` 输出方式
+- 在 `src/app/cli-orchestration.ts` 中新增 `ensureCliSubtask`，负责：
+  - 校验 `Execution` 阶段已经完成，不允许绕过 branch / artifact / verification 前置输入直接进入子任务预览
+  - 从显式参数或 run 上下文解析 issue key
+  - 持久化本地 subtask preview artifact，并生成 `artifact://jira/subtasks/preview/<id>` ref
+  - 把 run 推进到 `Artifact Linking` 的 `output_ready` 状态，等待后续审批
+- 在 `src/app/cli-orchestration.ts` 中新增 `persistSubtaskPreviewArtifact`，用于把 `jira.create_subtask` 的本地 preview 记录到 `artifacts/`，并保留 dry-run 标记。
+- 在测试侧补齐步骤 2 的红绿覆盖：
+  - `tests/integration/cli/run-record-commands.spec.ts` 锁定新命令曝光、Execution 未完成时拒绝预览，以及 Execution 补齐后生成 subtask preview 的上下文结果
+
+### 依据
+
+- 用户指令：继续执行 `memory-bank/features/v2/实施计划.md` 的任务 3；每完成一个步骤先测试，通过后先更新 `progress.md` 与 `architecture.md`。
+- `memory-bank/features/v2/实施计划.md` 任务 3 步骤 2：
+  - 新增 `run ensure-subtask`，用于创建或确认该 bug 对应的开发子任务
+  - 子任务创建前必须先 preview 和审批
+- `memory-bank/features/v1/技术方案.md`：
+  - `Artifact Linking` 属于写回阶段，必须通过统一 preview / approval / execute 语义推进
+  - CLI Layer 只负责参数与展示，状态推进仍由 app / workflow owner 统一处理
+
+### 验证记录
+
+1. 验证对象：`run ensure-subtask` 命令曝光与执行前置约束
+   触发方式：先修改 `tests/integration/cli/run-record-commands.spec.ts`，再运行 `npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts`
+   预期结果：实现前暴露“命令不存在”和“无法表达 Execution 未完成时的拒绝”；实现后命令 help、早期失败和成功预览都成立
+   实际结果：通过；red 阶段出现 2 个失败断言，green 后 integration `11/11` 通过
+
+2. 验证对象：TypeScript 类型一致性
+   触发方式：运行 `npm run typecheck`
+   预期结果：新增的 subtask preview artifact helper、CLI 命令与 orchestration 返回结构在仓库范围内类型一致
+   实际结果：通过；命令退出码为 0
+
+### 当前边界说明
+
+- 目前的 `run ensure-subtask` 只负责生成本地 preview artifact 并把 run 推进到 `Artifact Linking` 的审批前状态，不执行真实 Jira 子任务创建。
+- `jira_subtask_result_ref` 仍保持 `null`，直到后续任务 4 为 `jira.create_subtask` 补齐真实 execute / dedupe / reconcile 语义。
+- 本步骤没有扩展 generic `run execute-write` 的 subtask-specific 行为，避免提前进入任务 4。
+
+## 2026-03-20 - v2 任务 3 步骤 1：新增 `run bind-branch` 并把 branch 绑定接入 Execution 等待输入
+
+### 本轮完成内容
+
+- 在 `src/cli/run/register.ts` 中新增 `run bind-branch` 命令，最小输入为：
+  - `--run <id>`
+  - `--branch <name>`
+  - 可选 `--issue <key>` 作为 issue key 覆盖
+- 在 `src/app/cli-orchestration.ts` 中新增 `bindCliRunBranch`，负责：
+  - 从显式 `--issue`、`active_bug_issue_key` 或 `jira_issue_snapshot_ref` 中解析当前 bug issue key
+  - 将 branch 绑定请求持久化为本地 artifact 文件
+  - 生成符合任务 2 契约的 `artifact://jira/bindings/branch/<id>` ref
+  - 通过统一 `updateRun` 路径把 branch 绑定写回当前 run
+- 在 `src/workflow/execution.ts` 中把 `branch_binding` 纳入 `Execution` 阶段的外部输入判定：
+  - `Execution` 现在同时等待 `gitlab_artifacts`、`verification_results`、`branch_binding`
+  - `recordExecutionExternalInputs` 支持补录 `branchBindingRef`
+  - 等待摘要和 `waiting_reason` 会准确反映 branch 是否已绑定
+- 在 `src/app/cli-orchestration.ts` 的状态摘要中补充 `run bind-branch` 为 `waiting_external_input` 时的允许动作，保证 CLI 能直接提示下一步。
+- 在测试侧补齐步骤 1 的红绿覆盖：
+  - `tests/unit/execution/execution.spec.ts` 锁定 `branch_binding` 缺失/补齐后的等待语义
+  - `tests/integration/cli/run-record-commands.spec.ts` 锁定新命令曝光、`record jira` 的新等待原因以及 branch 绑定后的上下文更新
+  - `tests/integration/cli/writeback-flows.spec.ts` 同步到新前置条件，显式在 Jira 写回子流程中先执行 `run bind-branch`
+
+### 依据
+
+- 用户指令：继续执行 `memory-bank/features/v2/实施计划.md` 的任务 3；每完成一个步骤先测试，通过后再继续；测试通过后先更新 `progress.md` 与 `architecture.md`，在此之前不进入下一步骤。
+- `memory-bank/features/v2/实施计划.md` 任务 3 步骤 1：
+  - 新增 `run bind-branch`，用于显式绑定 bug Jira 与当前开发分支
+  - 把 branch 输入接到统一 workflow 状态语义中，branch 未提供时 `Execution` 可进入 `waiting_external_input`
+- `memory-bank/features/v1/需求文档.md`：
+  - `CLI 需求` 要求能力通过显式 CLI 命令暴露
+  - `工作流需求` 与 `检查点与恢复要求` 要求等待外部输入时使用统一 `waiting_external_input` 语义，并能从持久化状态恢复
+- `memory-bank/features/v1/技术方案.md`：
+  - `Execution` 阶段允许因外部输入缺失进入 `waiting_external_input`
+  - CLI 入口只做参数校验与结果展示，业务状态仍由 workflow/app 层统一更新
+
+### 验证记录
+
+1. 验证对象：`run bind-branch` 命令入口与 `Execution` 的 branch 等待语义
+   触发方式：先修改 `tests/unit/execution/execution.spec.ts` 与 `tests/integration/cli/run-record-commands.spec.ts`，再运行 `npm run test:unit -- tests/unit/execution/execution.spec.ts` 与 `npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts`
+   预期结果：实现前准确暴露“缺少 branch_binding 等待逻辑”和“CLI 命令不存在”；实现后命令、等待原因与上下文更新都成立
+   实际结果：通过；red 阶段分别暴露 unit 3 个失败断言与 integration 4 个失败断言，green 后 unit `71/71`、integration `10/10` 通过
+
+2. 验证对象：受影响的 Jira 写回子流程回归
+   触发方式：在 `tests/integration/cli/writeback-flows.spec.ts` 中补上 `run bind-branch` 前置动作后运行 `npm run test:integration`
+   预期结果：`jira_writeback_only` 子流程在显式绑定 branch 后仍能继续完成 preview / approve / execute
+   实际结果：通过；integration 全量 `10/10` 通过
+
+3. 验证对象：TypeScript 类型一致性
+   触发方式：运行 `npm run typecheck`
+   预期结果：新增命令、workflow 输入与持久化 artifact 辅助函数在仓库范围内类型一致
+   实际结果：通过；命令退出码为 0
+
+### 当前边界说明
+
+- 目前只完成了任务 3 的步骤 1，不包含 `run ensure-subtask`、`run provide-fix-commit` 或 task 4 的 Jira connector preview / execute 语义。
+- `run bind-branch` 当前负责记录“branch 已显式绑定”的本地 artifact 与 context ref，不会执行真实 Jira branch 关联写回；真实外部写入仍保留给后续 `preview -> approve -> execute` 链路。
+- `Execution` 现阶段把 branch 视为继续进入 `Artifact Linking` 的必要外部输入之一，但 commit 仍未纳入这一等待条件，避免在步骤 1 里提前扩展步骤 3 的范围。
+
 ## 2026-03-19 - v2 任务 2：扩展核心数据模型、artifact 与 side-effect ledger 契约
 
 ### 本轮完成内容

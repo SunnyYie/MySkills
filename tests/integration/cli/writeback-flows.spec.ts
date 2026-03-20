@@ -97,6 +97,19 @@ describe('CLI writeback flows', () => {
       'node',
       'bugfix-orchestrator',
       'run',
+      'bind-branch',
+      '--run',
+      jiraRun.runId,
+      '--branch',
+      'bugfix/BUG-900',
+      '--json',
+    ]);
+    collector.reset();
+
+    await program.parseAsync([
+      'node',
+      'bugfix-orchestrator',
+      'run',
       'provide-artifact',
       '--run',
       jiraRun.runId,

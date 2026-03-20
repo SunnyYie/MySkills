@@ -1,5 +1,176 @@
 # Architecture Notes
 
+## v2 任务 3 步骤 4 当前状态语义收敛层
+
+前三步把命令入口都补出来之后，最后一个关键问题是：`run status` 到底能不能准确告诉用户“现在缺什么、下一步做什么、旧 preview 还是否有效”。这一步的价值在于把三个入口从“能调用”收敛成“能被状态机正确解释”。
+
+## 新增/调整文件职责
+
+### `src/app/cli-orchestration.ts`
+
+- 这一轮它除了继续做命令装配，还开始承担“status 引导精确化”的职责。
+- `buildStatusSummary` 不再简单地因为 `waiting_external_input` 就把所有补录命令都列出来，而是会根据 `Execution` 当前真正缺失的输入做动作裁剪。
+- 这让 CLI status 成为 workflow 的真实投影，而不是一个宽泛但误导的帮助列表。
+
+### `tests/integration/cli/run-record-commands.spec.ts`
+
+- 本轮它验证的不再是单个命令是否存在，而是命令执行后 `status` 是否正确变化：
+  - branch 补齐后，不该继续提示 `bind-branch`
+  - fix commit 补录后，应该提示重新 preview，而不是继续 approve 旧 preview
+- 也就是说，它现在开始保护“状态变化后的用户引导”这一层行为。
+
+## 任务 3 步骤 4 架构洞察
+
+- `waiting_external_input` 只是一个阶段级状态，不够表达“究竟缺什么”。这一步通过 `missingInputs -> allowedActions` 的映射，把 coarse-grained 状态变成了用户可执行的下一步动作，这对 CLI-first 系统尤其重要。
+
+- `run status` 的动作提示变精确之后，`bind-branch`、`ensure-subtask`、`provide-fix-commit` 才真正形成了一个闭环：命令不只是存在，还能在正确的阶段被系统主动引导出来。
+
+- 这一步还确认了一个重要边界：任何会改变 `Artifact Linking` 写回输入的动作，都必须让旧 preview 失效。否则 status 和审批动作就会对已经过期的 preview 产生误导，破坏 `preview -> approve -> execute` 的核心安全原则。
+
+## v2 任务 3 步骤 3 当前 commit 归属录入层
+
+这一步把 “fix commit 属于哪个 issue” 从隐式约定变成了显式命令输入，但仍然只停留在 workflow 输入收集层。它解决的是“如何让 Artifact Linking 拿到 commit 归属事实”，而不是“如何把 commit 真正写回 Jira”。
+
+## 新增/调整文件职责
+
+### `src/cli/run/register.ts`
+
+- 新增 `provide-fix-commit` 命令入口，明确要求 `run id`、`issue key` 和 `commit sha`。
+- 这继续遵守 CLI 层只处理参数边界的原则：issue 与 commit 必须由用户显式声明，不在 CLI 层做隐式猜测。
+
+### `src/app/cli-orchestration.ts`
+
+- 新增 `provideCliFixCommit` 后，这个文件开始承担“commit 归属录入会影响 Artifact Linking 预览有效性”的应用逻辑。
+- 它除了写入 `git_commit_binding_refs` 之外，还会主动：
+  - 清空当前 Jira writeback draft/result
+  - 把 `Artifact Linking` 置回 `not_started`
+  - 移除该阶段的 active approval
+- 这说明 commit 归属不是一个纯附加注释，而是会改变后续写回语义的有效输入。
+
+### `persistCommitBindingArtifact`（位于 `src/app/cli-orchestration.ts`）
+
+- 这个 helper 的职责与 branch/subtask helper 保持对称：
+  - 把 commit 归属正文写进 `artifacts/`
+  - 只把 `artifact://jira/bindings/commit/<id>` ref 留在 context
+- 它让 `git_commit_binding_refs` 真正从“schema 中冻结的字段”变成了可被 run 持久化和恢复的实际指针。
+
+### `tests/integration/cli/run-record-commands.spec.ts`
+
+- 本轮新增断言证明：当用户在 `Artifact Linking` 前后补录 fix commit 时，旧 preview 不能继续被视为有效。
+- 这组测试因此不仅验证“命令存在”，还验证“输入变化会让 preview 失效并要求重建”。
+
+## 任务 3 步骤 3 架构洞察
+
+- `provide-fix-commit` 选择把 `Artifact Linking` 重置为 `not_started`，而不是保留 `output_ready`，是一个很关键的安全设计：只要写回输入变了，旧 preview 就不再可信。
+
+- `git_commit_binding_refs` 被设计成数组而不是单值，说明架构上已经为一个 run 关联多个 fix commit 留好了空间；这一步虽然还没做 dedupe，但至少没有把模型锁死成“只能有一个 commit”。
+
+- commit 归属被要求显式传入 `--issue`，体现了当前阶段对 owner 边界的保守选择：在缺少真实 Jira / project profile 装配前，宁可让用户多给一个参数，也不在 workflow 里偷偷推断 subtask 或 bug 归属。
+
+## v2 任务 3 步骤 2 当前子任务预览接线层
+
+这一步的目标不是把 Jira 子任务真正创建出来，而是先为 “ensure-subtask” 建立一个严格受控的入口：只有当 `Execution` 所需输入已经齐备时，run 才能被推进到 `Artifact Linking` 的 preview/approval 状态。这样子任务创建仍然服从统一写回边界，而不会变成一个脱离 workflow 的捷径命令。
+
+## 新增/调整文件职责
+
+### `src/cli/run/register.ts`
+
+- 继续只负责 `run` 命令组的参数入口，本轮新增 `ensure-subtask`。
+- 它不直接决定阶段能否跳转，只把 `run id`、可选 `issue key` 和 dry-run 选项转交给 app 层。
+
+### `src/app/cli-orchestration.ts`
+
+- 新增 `ensureCliSubtask` 后，这个文件现在开始承担“显式子任务预览入口”的应用装配职责。
+- 关键职责有三层：
+  - 先验证 `Execution` 是否已经完成，阻止用户绕过 branch / artifact / verification 的前置收集
+  - 再生成本地 subtask preview artifact
+  - 最后把 run 推到 `Artifact Linking/output_ready`
+- 这一设计让 `ensure-subtask` 既是新的 CLI 入口，又没有绕开既有 checkpoint/context 更新链路。
+
+### `persistSubtaskPreviewArtifact`（位于 `src/app/cli-orchestration.ts`）
+
+- 这是步骤 2 新增的局部 helper，职责非常窄：
+  - 把本地预览正文写入 `artifacts/`
+  - 生成符合任务 2 ref 契约的 `artifact://jira/subtasks/preview/<id>`
+- 它刻意只生成 preview，不生成 result，也不做 dedupe/reconcile，确保职责不越界到任务 4。
+
+### `tests/integration/cli/run-record-commands.spec.ts`
+
+- 这一轮它不只验证命令是否存在，还明确保护两个 workflow 事实：
+  - `Execution` 没完成时，`ensure-subtask` 必须失败
+  - `Execution` 完成后，`ensure-subtask` 才能留下 `jira_subtask_ref` 并把当前阶段切到 `Artifact Linking`
+- 这让集成测试开始覆盖“命令入口”和“阶段门禁”的组合语义，而不是只看 help 输出。
+
+## 任务 3 步骤 2 架构洞察
+
+- `ensure-subtask` 被设计成“生成 preview 并推进到审批前状态”，而不是直接调用已有 `preview-write`，因为它承载的是更高层的业务意图：确保 bug 对应的开发子任务存在。这个命令先把业务意图写进 run state，后续 connector 再决定如何把它翻译成真实 Jira 请求。
+
+- `Execution` 完成校验被放在 app 层而不是 CLI 层，是因为它依赖 run 当前有效态；CLI 只知道参数是否齐全，不知道 workflow 是否允许进入下一阶段。
+
+- `jira_subtask_ref` 在这一步开始真正承载 preview ref，而不是仅仅存在于 schema 中。这意味着任务 2 冻结的字段第一次变成了“有实际业务含义的状态指针”，后续任务 4 可以直接围绕这个指针扩展 execute/result/dedupe，而不用重新发明入口。
+
+## v2 任务 3 步骤 1 当前 CLI / workflow 接线层
+
+任务 3 的第一个落点不是“真实 Jira branch 绑定”，而是先把 branch 作为一个受控、可恢复、可审计的 workflow 输入接进来。这个阶段解决的是：用户如何显式声明“当前开发分支属于这个 bug”，以及 run 怎样把这条输入稳定地纳入 `Execution -> Artifact Linking` 之间的等待语义。
+
+## 新增/调整文件职责
+
+### `src/cli/run/register.ts`
+
+- 继续作为 `run` 命令组的入口注册表，本轮新增 `bind-branch` 子命令。
+- 这里的职责仍然只限于参数面：
+  - 要求 `--run`
+  - 要求 `--branch`
+  - 允许可选 `--issue`
+- 它不解析 issue key 来源，也不直接改 run state；真正的业务语义仍下沉到 app/workflow。
+
+### `src/app/cli-orchestration.ts`
+
+- 本轮新增 `bindCliRunBranch`，让 CLI 入口第一次具备“把 branch 绑定写进 run”的能力。
+- 这一层承担三件事：
+  - 从显式参数或现有 run 上下文中解析 bug issue key
+  - 生成本地 branch binding artifact，并返回符合 domain 契约的 branch binding ref
+  - 复用 `updateRun + recordExecutionExternalInputs` 更新当前有效态
+- 关键点在于它没有自行维护第二套状态机，而是继续复用现有 checkpoint / context 持久化路径，所以 branch 绑定天然继承了恢复与审计语义。
+
+### `src/workflow/execution.ts`
+
+- 这一轮从“Execution 等待 GitLab artifact 与 verification”升级为“Execution 等待所有进入 Artifact Linking 前必需的外部输入”。
+- `branch_binding` 被并入 `ExecutionExternalInputKey` 后，这个文件开始正式定义：
+  - branch 什么时候算缺失
+  - 缺失时 `waiting_reason` 怎么表达
+  - branch 补齐后何时还能继续等其他输入，何时才真正完成 `Execution`
+- 这使 `Execution` 阶段不再只关心“代码改完没”，而是关心“后续 Jira 关联写回所需的最小前置输入是否已齐备”。
+
+### `tests/unit/execution/execution.spec.ts`
+
+- 现在不再只是验证 artifact / verification 的等待语义，而是成为任务 3 步骤 1 的 workflow 契约锁：
+  - 三类外部输入同时缺失时的等待原因
+  - 只缺 branch 时的单独等待原因
+  - branch 补齐前后 `Execution` 的完成边界
+
+### `tests/integration/cli/run-record-commands.spec.ts`
+
+- 本轮开始保护 CLI 面与 workflow 语义的一致性：
+  - `run` help 中能看到 `bind-branch`
+  - `record jira` 初始化出的等待原因必须包含 branch 缺口
+  - 调用 `run bind-branch` 后，context 中必须留下 `git_branch_binding_ref`
+- 这组测试证明新命令不是“只注册了名字”，而是真正接通了 run state。
+
+### `tests/integration/cli/writeback-flows.spec.ts`
+
+- 虽然它不是为步骤 1 新建的测试，但它在这一步承担了重要回归角色：
+  - 证明 `jira_writeback_only` 子流程在新前置条件下仍然可跑通
+  - 逼迫我们把 branch 绑定纳入真实集成流，而不是只让单测通过
+
+## 任务 3 步骤 1 架构洞察
+
+- `run bind-branch` 之所以写进 `Execution` 的等待输入，而不是直接把 run 推到 `Artifact Linking`，是因为 branch 在这里更像“后续写回所需的前置事实”，不是已经执行完成的 Jira 写回结果。这样可以保持“输入收集”和“真实副作用执行”之间的边界。
+
+- branch 绑定被持久化成独立 artifact，同时 `context.json` 只保存 `git_branch_binding_ref`，延续了任务 2 的总体原则：当前有效态只保存索引/ref，不把可读正文和原始 payload 直接塞回上下文。
+
+- `recordExecutionExternalInputs` 被继续复用而不是新建一套 `recordBranchBinding` 状态机，说明当前架构选择把“Execution 阶段的所有外部输入”收敛到一个 owner 中。这样后续 `provide-fix-commit` 如果也需要影响 Execution/Artifact Linking 的衔接，可以优先复用这条路径，而不是再分叉出新的等待语义实现。
+
 ## v2 任务 2 当前契约与承载边界层
 
 任务 2 完成后，v2 第一优先级新增能力终于有了稳定的运行态落点，但仍然严格停留在“契约冻结”层。这个阶段解决的是“哪些 key/ref 会进入当前有效态、哪些正文必须留在 artifact、哪些幂等与执行元数据必须进 ledger”，而不是提前实现 CLI 入口或真实 Jira 写回。

@@ -67,6 +67,9 @@ type RunStatusInput = HomeDirOptions & {
 type RunStageActionInput = CommonCommandOptions &
   HomeDirOptions & {
     runId: string;
+    issueKey?: string;
+    branchName?: string;
+    commitSha?: string;
     stage?: (typeof BUGFIX_STAGES)[number];
     previewRef?: string;
     rollbackToStage?: (typeof BUGFIX_STAGES)[number];
@@ -117,6 +120,11 @@ const DEFAULT_INITIATOR = 'cli:operator';
 
 const serializeHash = (value: unknown) =>
   `sha256:${createHash('sha256').update(JSON.stringify(value)).digest('hex')}`;
+
+const extractIssueKeyFromSnapshotRef = (snapshotRef: string) => {
+  const matched = /^artifact:\/\/jira\/(.+)$/.exec(snapshotRef);
+  return matched?.[1] ?? null;
+};
 
 const loadContext = async (runId: string, homeDir?: string) => {
   const runPaths = getRunPaths(runId, homeDir);
@@ -197,8 +205,22 @@ const buildStatusSummary = (context: ExecutionContext) => {
   const allowedActions = new Set<string>(['run status', 'run resume']);
 
   if (context.run_lifecycle_status === 'waiting_external_input') {
-    allowedActions.add('run provide-artifact');
-    allowedActions.add('run provide-verification');
+    const missingInputs =
+      context.current_stage === EXECUTION_STAGE
+        ? getExecutionExternalInputState(context).missingInputs
+        : [];
+
+    if (missingInputs.includes('gitlab_artifacts')) {
+      allowedActions.add('run provide-artifact');
+    }
+
+    if (missingInputs.includes('verification_results')) {
+      allowedActions.add('run provide-verification');
+    }
+
+    if (missingInputs.includes('branch_binding')) {
+      allowedActions.add('run bind-branch');
+    }
   }
 
   if (
@@ -206,6 +228,10 @@ const buildStatusSummary = (context: ExecutionContext) => {
     context.current_stage === KNOWLEDGE_RECORDING_STAGE
   ) {
     allowedActions.add('run preview-write');
+
+    if (context.current_stage === ARTIFACT_LINKING_STAGE) {
+      allowedActions.add('run provide-fix-commit');
+    }
 
     if (stageStatus === 'output_ready') {
       allowedActions.add('run approve');
@@ -246,18 +272,20 @@ const applyRunModePreset = (
   }
 
   if (context.run_mode === 'jira_writeback_only') {
+    const executionInputState = getExecutionExternalInputState(nextContext);
+
     nextContext = {
       ...nextContext,
       current_stage: EXECUTION_STAGE,
-      run_lifecycle_status: 'waiting_external_input',
-      waiting_reason: 'gitlab_artifacts,verification_results',
+      run_lifecycle_status: executionInputState.runLifecycleStatus,
+      waiting_reason: executionInputState.waitingReason,
     };
     nextStageStatusMap.Intake = 'skipped';
     nextStageStatusMap['Context Resolution'] = 'skipped';
     nextStageStatusMap['Requirement Synthesis'] = 'skipped';
     nextStageStatusMap['Code Localization'] = 'skipped';
     nextStageStatusMap['Fix Planning'] = 'skipped';
-    nextStageStatusMap.Execution = 'waiting_external_input';
+    nextStageStatusMap.Execution = executionInputState.stageStatus;
     nextStageStatusMap[ARTIFACT_LINKING_STAGE] = 'not_started';
     nextStageStatusMap[KNOWLEDGE_RECORDING_STAGE] = 'skipped';
     return nextContext;
@@ -665,6 +693,105 @@ const persistArtifactDocument = async ({
   };
 };
 
+const persistBranchBindingArtifact = async ({
+  runId,
+  issueKey,
+  branchName,
+  homeDir,
+}: {
+  runId: string;
+  issueKey: string;
+  branchName: string;
+  homeDir?: string;
+}) => {
+  const runPaths = getRunPaths(runId, homeDir);
+  const bindingId = `${runId}-${Date.now()}`;
+  const targetPath = path.join(
+    runPaths.artifactsDir,
+    `jira-branch-binding-${bindingId}.json`,
+  );
+  const artifactRef = `artifact://jira/bindings/branch/${bindingId}`;
+  const payload = {
+    operation: 'jira.bind_branch',
+    issue_key: issueKey,
+    branch_name: branchName,
+    recorded_at: new Date().toISOString(),
+  };
+
+  await writeJsonAtomically(targetPath, payload);
+
+  return {
+    artifactRef,
+    targetPath,
+  };
+};
+
+const persistSubtaskPreviewArtifact = async ({
+  runId,
+  issueKey,
+  dryRun,
+  homeDir,
+}: {
+  runId: string;
+  issueKey: string;
+  dryRun: boolean;
+  homeDir?: string;
+}) => {
+  const runPaths = getRunPaths(runId, homeDir);
+  const previewId = `${runId}-${Date.now()}`;
+  const targetPath = path.join(
+    runPaths.artifactsDir,
+    `jira-subtask-preview-${previewId}.json`,
+  );
+  const artifactRef = `artifact://jira/subtasks/preview/${previewId}`;
+  const payload = {
+    operation: 'jira.create_subtask',
+    issue_key: issueKey,
+    is_dry_run: dryRun,
+    generated_at: new Date().toISOString(),
+  };
+
+  await writeJsonAtomically(targetPath, payload);
+
+  return {
+    artifactRef,
+    targetPath,
+  };
+};
+
+const persistCommitBindingArtifact = async ({
+  runId,
+  issueKey,
+  commitSha,
+  homeDir,
+}: {
+  runId: string;
+  issueKey: string;
+  commitSha: string;
+  homeDir?: string;
+}) => {
+  const runPaths = getRunPaths(runId, homeDir);
+  const bindingId = `${runId}-${Date.now()}`;
+  const targetPath = path.join(
+    runPaths.artifactsDir,
+    `jira-commit-binding-${bindingId}.json`,
+  );
+  const artifactRef = `artifact://jira/bindings/commit/${bindingId}`;
+  const payload = {
+    operation: 'jira.bind_commit',
+    issue_key: issueKey,
+    commit_sha: commitSha,
+    recorded_at: new Date().toISOString(),
+  };
+
+  await writeJsonAtomically(targetPath, payload);
+
+  return {
+    artifactRef,
+    targetPath,
+  };
+};
+
 export const provideCliArtifacts = async ({
   runId,
   artifactFile,
@@ -715,6 +842,310 @@ export const provideCliArtifacts = async ({
       nonInteractive,
       checkpointId: updated.checkpoint.checkpoint_id,
       waitingReason: updated.context.waiting_reason,
+    };
+  });
+};
+
+export const bindCliRunBranch = async ({
+  runId,
+  branchName,
+  issueKey,
+  homeDir,
+  dryRun = false,
+  nonInteractive = false,
+}: RunStageActionInput) => {
+  if (!branchName?.trim()) {
+    return validationError(
+      'run bind-branch',
+      'branch name is required when binding a development branch.',
+      'Re-run the command with --branch <name>.',
+    );
+  }
+
+  return wrapCommand('run bind-branch', async () => {
+    const { context } = await loadContext(runId, homeDir);
+    const resolvedIssueKey =
+      issueKey?.trim() ??
+      context.active_bug_issue_key ??
+      extractIssueKeyFromSnapshotRef(context.jira_issue_snapshot_ref);
+
+    if (!resolvedIssueKey) {
+      throw StructuredErrorSchema.parse({
+        code: 'branch_binding_issue_missing',
+        category: 'validation_error',
+        stage: EXECUTION_STAGE,
+        system: 'cli',
+        operation: 'bind-branch',
+        target_ref: null,
+        message: 'run bind-branch requires a bug issue key to associate the branch.',
+        detail:
+          'The current run does not have an active bug issue key and no explicit --issue value was provided.',
+        retryable: false,
+        outcome_unknown: false,
+        user_action: 'Re-run the command with --issue <key> or restore a run with a Jira issue snapshot.',
+        raw_cause_ref: null,
+        partial_state_ref: null,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    const binding = await persistBranchBindingArtifact({
+      runId,
+      issueKey: resolvedIssueKey,
+      branchName: branchName.trim(),
+      homeDir,
+    });
+    const updated = await updateRun(
+      runId,
+      homeDir,
+      'execution_branch_bound',
+      async (currentContext) => {
+        const result = recordExecutionExternalInputs({
+          context: currentContext,
+          updatedAt: new Date().toISOString(),
+          branchBindingRef: binding.artifactRef,
+        });
+
+        if (!result.accepted) {
+          throw result.errors[0] ?? new Error('Branch binding failed.');
+        }
+
+        result.context.active_bug_issue_key = resolvedIssueKey;
+        result.context.current_stage = EXECUTION_STAGE;
+
+        return result.context;
+      },
+    );
+
+    return {
+      command: 'run bind-branch',
+      exitCode: CLI_EXIT_CODES.success,
+      runId,
+      issueKey: resolvedIssueKey,
+      branchName: branchName.trim(),
+      bindingRef: binding.artifactRef,
+      checkpointId: updated.checkpoint.checkpoint_id,
+      waitingReason: updated.context.waiting_reason,
+      dryRun,
+      nonInteractive,
+    };
+  });
+};
+
+export const ensureCliSubtask = async ({
+  runId,
+  issueKey,
+  homeDir,
+  dryRun = false,
+  nonInteractive = false,
+}: RunStageActionInput) =>
+  wrapCommand('run ensure-subtask', async () => {
+    const { context } = await loadContext(runId, homeDir);
+    const executionStageStatus = context.stage_status_map.Execution ?? 'not_started';
+
+    if (executionStageStatus !== 'completed' && executionStageStatus !== 'skipped') {
+      throw StructuredErrorSchema.parse({
+        code: 'ensure_subtask_execution_incomplete',
+        category: 'validation_error',
+        stage: ARTIFACT_LINKING_STAGE,
+        system: 'cli',
+        operation: 'ensure-subtask',
+        target_ref: context.jira_issue_snapshot_ref,
+        message:
+          'run ensure-subtask requires Execution external inputs to be complete first.',
+        detail:
+          'Complete branch binding, GitLab artifact recording, and verification recording before generating a subtask preview.',
+        retryable: false,
+        outcome_unknown: false,
+        user_action:
+          'Finish the remaining Execution inputs, then re-run ensure-subtask.',
+        raw_cause_ref: null,
+        partial_state_ref: null,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    const resolvedIssueKey =
+      issueKey?.trim() ??
+      context.active_bug_issue_key ??
+      extractIssueKeyFromSnapshotRef(context.jira_issue_snapshot_ref);
+
+    if (!resolvedIssueKey) {
+      throw StructuredErrorSchema.parse({
+        code: 'ensure_subtask_issue_missing',
+        category: 'validation_error',
+        stage: ARTIFACT_LINKING_STAGE,
+        system: 'cli',
+        operation: 'ensure-subtask',
+        target_ref: null,
+        message: 'run ensure-subtask requires a bug issue key.',
+        detail:
+          'The current run does not expose an active bug issue key and no explicit --issue value was provided.',
+        retryable: false,
+        outcome_unknown: false,
+        user_action: 'Re-run the command with --issue <key> or restore a bug-linked run.',
+        raw_cause_ref: null,
+        partial_state_ref: null,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    const preview = await persistSubtaskPreviewArtifact({
+      runId,
+      issueKey: resolvedIssueKey,
+      dryRun,
+      homeDir,
+    });
+    const updated = await updateRun(
+      runId,
+      homeDir,
+      'jira_subtask_preview_generated',
+      async (currentContext) => ({
+        ...currentContext,
+        updated_at: new Date().toISOString(),
+        current_stage: ARTIFACT_LINKING_STAGE,
+        run_lifecycle_status: 'active',
+        waiting_reason: null,
+        active_bug_issue_key:
+          currentContext.active_bug_issue_key ?? resolvedIssueKey,
+        jira_subtask_ref: preview.artifactRef,
+        jira_subtask_result_ref: null,
+        stage_status_map: {
+          ...currentContext.stage_status_map,
+          [ARTIFACT_LINKING_STAGE]: 'output_ready',
+        },
+        stage_artifact_refs: {
+          ...currentContext.stage_artifact_refs,
+          [ARTIFACT_LINKING_STAGE]: [preview.artifactRef],
+        },
+      }),
+    );
+
+    return {
+      command: 'run ensure-subtask',
+      exitCode: CLI_EXIT_CODES.success,
+      runId,
+      issueKey: resolvedIssueKey,
+      previewRef: preview.artifactRef,
+      currentStage: updated.context.current_stage,
+      stageStatus: updated.context.stage_status_map[ARTIFACT_LINKING_STAGE],
+      checkpointId: updated.checkpoint.checkpoint_id,
+      dryRun,
+      dryRunArtifactTag: dryRun
+        ? DRY_RUN_PERSISTENCE_POLICY.dryRunArtifactTag
+        : undefined,
+      nonInteractive,
+    };
+  });
+
+export const provideCliFixCommit = async ({
+  runId,
+  issueKey,
+  commitSha,
+  homeDir,
+  dryRun = false,
+  nonInteractive = false,
+}: RunStageActionInput) => {
+  if (!issueKey?.trim()) {
+    return validationError(
+      'run provide-fix-commit',
+      'issue key is required when recording fix commit ownership.',
+      'Re-run the command with --issue <key>.',
+    );
+  }
+
+  if (!commitSha?.trim()) {
+    return validationError(
+      'run provide-fix-commit',
+      'commit sha is required when recording a fix commit.',
+      'Re-run the command with --commit <sha>.',
+    );
+  }
+
+  return wrapCommand('run provide-fix-commit', async () => {
+    const { context } = await loadContext(runId, homeDir);
+    const executionStageStatus = context.stage_status_map.Execution ?? 'not_started';
+
+    if (executionStageStatus !== 'completed' && executionStageStatus !== 'skipped') {
+      throw StructuredErrorSchema.parse({
+        code: 'provide_fix_commit_execution_incomplete',
+        category: 'validation_error',
+        stage: ARTIFACT_LINKING_STAGE,
+        system: 'cli',
+        operation: 'provide-fix-commit',
+        target_ref: context.jira_issue_snapshot_ref,
+        message:
+          'run provide-fix-commit requires Execution external inputs to be complete first.',
+        detail:
+          'Complete branch binding, GitLab artifact recording, and verification recording before attaching fix commits to Artifact Linking.',
+        retryable: false,
+        outcome_unknown: false,
+        user_action:
+          'Finish the remaining Execution inputs, then re-run provide-fix-commit.',
+        raw_cause_ref: null,
+        partial_state_ref: null,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    const binding = await persistCommitBindingArtifact({
+      runId,
+      issueKey: issueKey.trim(),
+      commitSha: commitSha.trim().toLowerCase(),
+      homeDir,
+    });
+    const updated = await updateRun(
+      runId,
+      homeDir,
+      'artifact_linking_fix_commit_recorded',
+      async (currentContext) => {
+        const nextApprovalMap = {
+          ...currentContext.active_approval_ref_map,
+        };
+
+        delete nextApprovalMap[ARTIFACT_LINKING_STAGE];
+
+        return {
+          ...currentContext,
+          updated_at: new Date().toISOString(),
+          current_stage: ARTIFACT_LINKING_STAGE,
+          waiting_reason: null,
+          active_bug_issue_key:
+            currentContext.active_bug_issue_key ?? issueKey.trim(),
+          git_commit_binding_refs: [
+            ...currentContext.git_commit_binding_refs,
+            binding.artifactRef,
+          ],
+          jira_writeback_draft_ref: null,
+          jira_writeback_result_ref: null,
+          stage_status_map: {
+            ...currentContext.stage_status_map,
+            [ARTIFACT_LINKING_STAGE]: 'not_started',
+          },
+          stage_artifact_refs: {
+            ...currentContext.stage_artifact_refs,
+            [ARTIFACT_LINKING_STAGE]: [
+              ...(currentContext.stage_artifact_refs[ARTIFACT_LINKING_STAGE] ?? []),
+              binding.artifactRef,
+            ],
+          },
+          active_approval_ref_map: nextApprovalMap,
+        };
+      },
+    );
+
+    return {
+      command: 'run provide-fix-commit',
+      exitCode: CLI_EXIT_CODES.success,
+      runId,
+      issueKey: issueKey.trim(),
+      commitSha: commitSha.trim().toLowerCase(),
+      bindingRef: binding.artifactRef,
+      currentStage: updated.context.current_stage,
+      stageStatus: updated.context.stage_status_map[ARTIFACT_LINKING_STAGE],
+      checkpointId: updated.checkpoint.checkpoint_id,
+      dryRun,
+      nonInteractive,
     };
   });
 };

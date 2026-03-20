@@ -1,5 +1,148 @@
 # Progress
 
+## 2026-03-20 - v2 任务 9：冻结代码定位与修复计划主流程接线契约
+
+### 本轮完成内容
+
+- 在 `tests/integration/cli/run-record-commands.spec.ts` 中补齐任务 9 的主流程契约覆盖，并确认现有 production 接线已经满足计划要求，因此本轮没有新增 production 代码变更。
+- 步骤 1：补齐 `Context Resolution` artifact 集成断言，锁定主流程在 `run start` 后会把项目、需求、仓库与模块解析结果落为 workflow-owned artifact，而不是只停留在内存投影。
+- 步骤 2：补齐 `Code Localization` 的两类等待路径断言：
+  - 多候选文件命中时，主流程会停在 `Code Localization`，落等待态 artifact，并保留上游 `Requirement Synthesis` 审批引用
+  - 无代码命中时，主流程会停在 `Code Localization`，落空搜索 artifact，并显式进入 `manual_code_localization`
+- 步骤 3：补齐 `Fix Planning` 集成断言，锁定唯一命中场景下 `Code Localization` 与 `Fix Planning` 都会产出结构化 artifact，且 `ExecutionContext` 只投影最小的 `code_targets`、`root_cause_hypotheses`、`fix_plan` 与 `verification_plan`。
+- 步骤 4：补齐 checkpoint / approval chain 断言，确认 `Requirement Synthesis` 批准后写入的最新 checkpoint 会带上当前有效审批引用；`Fix Planning` 等待审批时仍复用统一 `waiting_approval` 语义，而不是旁路状态。
+
+### 依据
+
+- 用户指令：继续执行 `memory-bank/features/v2/实施计划.md` 的任务 9；每完成一个步骤都必须先测试，通过后记录 `progress.md`，并在此之前不要开始任务 10；测试通过后再补 `architecture.md`。
+- `memory-bank/features/v2/实施计划.md` 任务 9：
+  - 补齐 `Context Resolution` 阶段对项目、仓库、需求、模块解析结果的真实落地
+  - 补齐 `Code Localization` 阶段候选代码位置和影响模块产物
+  - 补齐 `Fix Planning` 阶段修复建议、验证建议和开放风险产物
+  - 确保这些产物进入 artifact、checkpoint 与审批引用链路
+- `memory-bank/features/v1/需求文档.md`：
+  - `Code Localization` 与 `Fix Planning` 属于 Requirement 审批后的主流程正式阶段
+  - 多候选、无结果场景必须显式暴露等待原因，不能伪造“自动已解决”的产物
+- `memory-bank/features/v1/技术方案.md`：
+  - `Workflow/Agent Layer` 是唯一业务状态 owner
+  - `ExecutionContext` 只保存当前业务有效态，长文本与完整产物正文应保留在 artifact
+  - 审批、checkpoint 与恢复都必须围绕已落盘 artifact / context 运转
+
+### 验证记录
+
+1. 验证对象：任务 9 步骤 1 `Context Resolution` artifact 落地
+   触发方式：为 `run start` 新增 `Context Resolution` artifact 断言后运行 `npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts`
+   预期结果：artifact 中显式保留 `project_id`、`requirement`、`repo_selection`、`requirement_source_ref` 与 GitLab 目标信息
+   实际结果：通过；集成测试验证主流程已把这些结果落为结构化 artifact
+
+2. 验证对象：任务 9 步骤 2 `Code Localization` 等待态接线
+   触发方式：分别为“多候选命中”“无代码命中”补齐主流程集成断言，并运行 `npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts`
+   预期结果：两类场景都停在 `Code Localization`，落等待态 artifact，并保留上游审批引用，不伪造 `Fix Planning`
+   实际结果：通过；集成测试验证 `manual_code_target_selection` 与 `manual_code_localization` 两条等待语义都已稳定接线
+
+3. 验证对象：任务 9 步骤 3 `Fix Planning` artifact 与最小上下文投影
+   触发方式：为唯一命中场景补齐 `Code Localization` / `Fix Planning` artifact、`fix_plan`、`verification_plan` 断言，并运行 `npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts`
+   预期结果：主流程在 `Fix Planning` 前后同时保留详细 artifact 与最小 `ExecutionContext` 投影
+   实际结果：通过；集成测试验证详细修复建议仍保留在 artifact，当前有效态只保留后续执行所需最小字段
+
+4. 验证对象：任务 9 步骤 4 checkpoint / approval chain
+   触发方式：为 `Requirement Synthesis` 批准后的最新 checkpoint 补齐断言，并运行 `npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts`
+   预期结果：最新 checkpoint 能保留当前有效审批引用，且 `Fix Planning` 继续停在统一 `waiting_approval` 门上
+   实际结果：通过；最新 checkpoint 显式带上 `Requirement Synthesis` approval ref，`Fix Planning` 仍使用统一审批状态语义
+
+5. 验证对象：任务 9 整体回归
+   触发方式：运行 `npm run test:unit -- tests/unit/intake/project-context.spec.ts && npm run test:unit -- tests/unit/code-locator/code-locator.spec.ts && npm run test:unit -- tests/unit/fix-planner/fix-planner.spec.ts && npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts && npm run typecheck`
+   预期结果：`project-context`、`code-locator`、`fix-planner` 与主流程装配在类型与行为上保持一致
+   实际结果：通过；相关 unit 回归累计 `80/80` 通过，`run-record-commands` 集成 `25/25` 通过，`typecheck` 退出码为 0，随后 `npm run test:milestones -- tests/milestones/document-consistency.spec.ts` 也通过 `3/3`
+
+### 当前边界说明
+
+- 任务 9 到此已经把 `Context Resolution`、`Code Localization`、`Fix Planning` 的主流程产物来源、等待语义、artifact/checkpoint/approval 链冻结为可回归契约。
+- 本轮没有进入任务 10，因此 requirement manual override / selection CLI、子工作流补录入口与 checkpoint 继续执行体验仍保持上一轮边界。
+- 本轮没有扩展自动改代码、自动执行测试、自动创建 commit / branch / MR 等非目标能力。
+
+## 2026-03-20 - v2 任务 8：补齐 Requirement Brief 对外交付
+
+### 本轮完成内容
+
+- 在 `src/app/cli-orchestration.ts` 的 `createCliRun()` 中把 `brief_only` 从“只初始化 run”改成真实子工作流：
+  - 读取 Jira snapshot
+  - 复用 `runInitialAnalysisFlow()` 跑完 `Intake -> Context Resolution -> Requirement Synthesis`
+  - 为 `Requirement Synthesis` 落盘 stage artifact
+  - 把 `Code Localization`、`Fix Planning`、`Execution`、`Artifact Linking`、`Knowledge Recording` 标记为 `skipped`
+  - 当 brief 成功生成时，将 subworkflow 直接收口为 `run_lifecycle_status = completed`、`run_outcome_status = success`
+- 在 `createCliRun()` 的返回 payload 中补充 `requirementBrief`，让 CLI 输出层和导出层都消费同一份结构化 brief，而不是各自重新拼接。
+- 在 `src/cli/shared.ts` 中补齐 `run brief` 的对外交付分流：
+  - 非 JSON stdout 改为输出 `Requirement Brief` 的 CLI 文本视图
+  - 当传入 `--output` 且不是 JSON 模式时，文件内容改为 `Requirement Brief` 的 Markdown 导出
+  - JSON 模式继续输出结构化 payload，不改变其他命令的默认行为
+- 在 `tests/integration/cli/run-record-commands.spec.ts` 中补齐任务 8 的集成覆盖：
+  - `run brief` 会真实生成 `Requirement Brief` artifact，而不是停留在空壳 `brief_only` run
+  - 非 JSON CLI 会显示 brief 最小字段
+  - `--output` 会导出 Markdown
+  - unresolved requirement 场景会在 CLI 与 Markdown 中显式保留 `Requirement: Unresolved`、`requirement_binding_status` 与 `binding_reason`
+- 同步更新 `memory-bank/progress.md` 与 `memory-bank/architecture.md`，记录任务 8 的交付结果、验证证据与架构洞察，避免后续开发者只能从代码 diff 反推设计意图。
+
+### 依据
+
+- 用户指令：继续执行 `memory-bank/features/v2/实施计划.md` 的任务 8；每完成一个步骤后必须先测试，通过后再进入下一步；测试通过后更新 `progress.md` 与 `architecture.md`，在此之前不要进行任务 9。
+- `memory-bank/features/v2/实施计划.md` 任务 8：
+  - 打通 `brief_only` 子工作流，使其真正生成 `Requirement Brief`
+  - 为 CLI 输出补齐 brief 最小字段展示
+  - 为 `--output` 或等价导出入口补齐 Markdown 导出
+  - 保持 unresolved requirement 场景的显式标记与原因说明
+- `memory-bank/features/v1/需求文档.md`：
+  - `Requirement Brief` 必须可在 CLI 中直接展示
+  - `Requirement Brief` 必须可导出为 Markdown
+  - 当 `requirement_binding_status = unresolved` 时必须保留 `binding_reason`
+- `memory-bank/features/v1/技术方案.md`：
+  - `Requirement Synthesis` 生成 `Requirement Brief`
+  - 子工作流需要复用统一状态机，并将不适用阶段标记为 `skipped`
+  - `Renderers` 负责 CLI / Markdown 输出，不参与业务推理
+
+### 验证记录
+
+1. 验证对象：任务 8 步骤 1 red 阶段
+   触发方式：先修改 `tests/integration/cli/run-record-commands.spec.ts`，再运行 `npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts`
+   预期结果：实现前准确暴露 `run brief` 仍停在初始化态，没有生成 `Requirement Brief`
+   实际结果：通过；red 阶段失败点为 `currentStage` 实际仍为 `Intake`，随后在修正 repo fixture 后明确暴露旧实现不会越过空壳初始化
+
+2. 验证对象：任务 8 步骤 1 green 阶段
+   触发方式：实现 `brief_only` 子工作流编排后运行 `npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts && npm run typecheck`
+   预期结果：`run brief` 会停在 `Requirement Synthesis` 并完成 brief 生成，留下 `Requirement Synthesis` artifact，后续阶段为 `skipped`
+   实际结果：通过；integration 全量 `18/18` 通过，`typecheck` 退出码为 0
+
+3. 验证对象：任务 8 步骤 2 red/green
+   触发方式：先新增非 JSON `run brief` CLI 展示断言，再运行 `npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts`；实现后再次运行 `npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts && npm run typecheck`
+   预期结果：实现前 stdout 仍是 pretty JSON；实现后 stdout 改为 `Requirement Brief` 的业务字段展示
+   实际结果：通过；red 阶段失败点为 stdout 仍输出 JSON，green 阶段 integration 全量 `19/19` 通过，`typecheck` 退出码为 0
+
+4. 验证对象：任务 8 步骤 3 red/green
+   触发方式：先新增 `run brief --output <path>` Markdown 导出断言，再运行 `npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts`；实现后再次运行 `npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts && npm run typecheck`
+   预期结果：实现前导出文件只会复制 CLI 文本；实现后导出文件为 Markdown，stdout 继续保持 CLI 版 brief
+   实际结果：通过；red 阶段失败点为导出文件首行仍为 `Requirement Brief` 而不是 `# Requirement Brief`，green 阶段 integration 全量 `20/20` 通过，`typecheck` 退出码为 0
+
+5. 验证对象：任务 8 步骤 4 unresolved requirement 显式标记
+   触发方式：新增 unresolved requirement 集成断言后运行 `npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts && npm run typecheck`
+   预期结果：CLI 与 Markdown 都显式保留 `Requirement: Unresolved`、`Requirement Binding Status: unresolved` 与 `Binding Reason`
+   实际结果：通过；integration 全量 `21/21` 通过，`typecheck` 退出码为 0
+
+6. 验证对象：任务 8 整体回归
+   触发方式：运行 `npm run test:unit -- tests/unit/requirement-brief/requirement-brief.spec.ts && npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts && npm run typecheck`
+   预期结果：Requirement Brief 的 skill、renderer、CLI 路径和类型边界保持一致
+   实际结果：通过；unit 全量 `80/80` 通过，integration 全量 `21/21` 通过，`typecheck` 退出码为 0
+
+7. 验证对象：任务 8 文档同步结果
+   触发方式：运行 `npm run test:milestones -- tests/milestones/document-consistency.spec.ts`
+   预期结果：新增的 `progress.md` / `architecture.md` 内容不破坏现有文档一致性检查
+   实际结果：通过；milestones 全量 `3/3` 通过
+
+### 当前边界说明
+
+- 任务 8 到此为止已经完成 `Requirement Brief` 的真实对外交付：`run brief` 不再是空壳 run，且支持 CLI 展示与 Markdown 导出。
+- 本轮没有进入任务 9，因此没有继续扩展 `project-context`、`code-locator`、`fix-planner` 在主流程中的新接线范围；主流程分析阶段仍保持任务 7 结束时的边界。
+- 本轮没有引入自动修改代码、自动执行测试、自动创建 commit / branch / MR 等 v1 / v2 非目标能力。
+
 ## 2026-03-20 - v2 任务 7 步骤 4：稳住 revise、stale、恢复与重复执行语义
 
 ### 本轮完成内容

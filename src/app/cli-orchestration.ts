@@ -14,6 +14,7 @@ import {
   type CheckpointRecord,
   type ExecutionContext,
   type GitLabArtifact,
+  type RequirementBrief,
   type VerificationResult,
 } from '../domain/index.js';
 import {
@@ -629,6 +630,7 @@ export const createCliRun = async ({
         run_mode: runMode,
       };
       let checkpointId: string;
+      let requirementBrief: RequirementBrief | null = null;
 
       if (runMode !== 'feishu_record_only') {
         const snapshot = await readJiraIssueSnapshot({
@@ -675,13 +677,49 @@ export const createCliRun = async ({
           nextContext = persistedStages.context;
           checkpointId =
             persistedStages.checkpointId ?? initialized.checkpoint.checkpoint_id;
+        } else if (runMode === 'brief_only') {
+          const analysisFlow = await runInitialAnalysisFlow({
+            projectProfile,
+            issueSnapshot: snapshot,
+          });
+          const persistedStages = await persistAnalysisStageExecutions({
+            runId: initialized.runId,
+            context: nextContext,
+            stageExecutions: analysisFlow.stageExecutions,
+            homeDir,
+          });
+
+          nextContext = applyRunModePreset(persistedStages.context);
+          if (
+            analysisFlow.currentStage === 'Requirement Synthesis' &&
+            analysisFlow.stageResults['Requirement Synthesis']?.status === 'completed'
+          ) {
+            requirementBrief =
+              analysisFlow.stageResults['Requirement Synthesis'].data;
+            nextContext = {
+              ...nextContext,
+              run_lifecycle_status: 'completed',
+              run_outcome_status: 'success',
+              waiting_reason: null,
+            };
+          }
+
+          const persisted = await persistUpdatedContext({
+            runId: initialized.runId,
+            context: nextContext,
+            triggerEvent:
+              nextContext.run_lifecycle_status === 'completed'
+                ? 'run_brief_generated'
+                : 'run_brief_initialized',
+            homeDir,
+          });
+          checkpointId = persisted.checkpoint.checkpoint_id;
         } else {
           nextContext = applyRunModePreset(nextContext);
           const persisted = await persistUpdatedContext({
             runId: initialized.runId,
             context: nextContext,
-            triggerEvent:
-              runMode === 'brief_only' ? 'run_brief_initialized' : 'run_started',
+            triggerEvent: 'run_started',
             homeDir,
           });
           checkpointId = persisted.checkpoint.checkpoint_id;
@@ -705,6 +743,7 @@ export const createCliRun = async ({
         currentStage: nextContext.current_stage,
         checkpointId,
         waitingReason: nextContext.waiting_reason,
+        requirementBrief,
         dryRun,
         dryRunArtifactTag: dryRun
           ? DRY_RUN_PERSISTENCE_POLICY.dryRunArtifactTag
@@ -716,6 +755,7 @@ export const createCliRun = async ({
         currentStage: ExecutionContext['current_stage'];
         checkpointId: string;
         waitingReason: string | null;
+        requirementBrief: RequirementBrief | null;
       };
     } finally {
       await initialized.releaseLock();

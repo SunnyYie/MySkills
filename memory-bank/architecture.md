@@ -1,5 +1,138 @@
 # Architecture Notes
 
+## v2 任务 9 当前代码定位与修复计划主流程接线层
+
+任务 7 已经把前五个分析阶段串进了主流程，但直到任务 9 之前，这条链路仍缺少对“下游产物到底是否已经成为正式 workflow 契约”的明确证明。任务 9 的重点不是再造一条新流程，而是把 `Context Resolution`、`Code Localization`、`Fix Planning` 已有的接线方式冻结成可回归事实：阶段结果必须落为 artifact、checkpoint 必须能引用当前有效审批、等待态也必须被视为正式阶段产物，而不是实现细节。
+
+## 新增/调整文件职责
+
+### `src/workflow/analysis-flow.ts`
+
+- 这个文件继续是分析主流程的 workflow owner，负责把：
+  - `project-context`
+  - `requirement-summarizer`
+  - `code-locator`
+  - `fix-planner`
+  串成前后两段可审批的执行链。
+- 任务 9 进一步确认了它的职责边界：
+  - workflow 只负责阶段顺序、阶段结果和最小 `contextPatch`
+  - 不直接决定 artifact 文件格式，也不自己写 checkpoint
+- 这让 `analysis-flow` 既是阶段编排 owner，又不会越权侵入 storage / renderer 职责。
+
+### `src/skills/project-context/index.ts`
+
+- 这个文件负责把 Jira bug 的原始事实解释成“项目上下文”：
+  - requirement binding 结果
+  - requirement candidates
+  - repo selection
+  - module candidates
+  - downstream GitLab 目标信息
+- 任务 9 明确了一个关键点：它的输出不是临时 helper 结果，而是 `Context Resolution` 的正式 artifact 来源。后续 Requirement Brief 与恢复语义都应基于这个结构化结果，而不是靠 CLI 或测试手工拼推。
+
+### `src/skills/requirement-summarizer/index.ts`
+
+- 这个文件把 `project-context` 的结构化结果收敛成 `Requirement Brief`。
+- 在任务 9 的链路里，它承担的是“连接上游上下文解析”和“下游代码定位”的桥梁角色：
+  - 上游 requirement / repo 解析结果在这里被整理成 reviewable brief
+  - 下游 `code-locator` 读取的是这份已经冻结的 brief，而不是重新回看所有 Jira 原始字段
+- 这意味着 `Requirement Brief` 在主流程中不仅是审批产物，也是下游分析的输入锚点。
+
+### `src/skills/code-locator/index.ts`
+
+- 这个文件负责把 bug 信号和 brief 转成：
+  - candidate code targets
+  - impact modules
+  - root cause hypotheses
+- 任务 9 证明了一个很重要的架构语义：`waiting` 不是异常，也不是“还没有结果”的空状态，而是 `Code Localization` 的正式阶段结果。
+- 多候选与无匹配场景都会落成 artifact，这意味着未来人工补录入口只需要消费该 artifact，不需要重新搜索 repo 才知道用户停在了哪里。
+
+### `src/skills/fix-planner/index.ts`
+
+- 这个文件把唯一可执行的代码定位结果收敛成：
+  - fix summary
+  - impact scope
+  - verification plan
+  - open risks
+  - pending external inputs
+- 任务 9 进一步明确：
+  - `Fix Planning` 的完整建议正文属于 stage artifact
+  - `ExecutionContext` 只投影后续执行真正需要的最小字段
+- 这是一个重要边界，因为它避免把长文本计划直接塞进当前运行态，保持了 `ExecutionContext` 的“最小有效态”原则。
+
+### `src/app/cli-orchestration.ts`
+
+- 这个文件继续承担 app 层总装配职责，但在任务 9 里被进一步验证为真正的 artifact / checkpoint 链路 owner：
+  - 接收 `analysis-flow` 的 `stageExecutions`
+  - 为每个阶段落 artifact
+  - 把最小投影合并进 `ExecutionContext`
+  - 写 checkpoint
+  - 在审批后从已落盘 artifact 继续装配下游输入
+- 任务 9 没有修改这段 production 逻辑，但通过新的集成覆盖确认了它的边界：主流程恢复和继续执行依赖的是已落盘 artifact，而不是 app 层临时内存对象。
+
+### `tests/integration/cli/run-record-commands.spec.ts`
+
+- 这个文件在任务 9 中新增了真正的主流程契约保护面：
+  - `Context Resolution` artifact 内容
+  - `Code Localization` 的多候选等待
+  - `Code Localization` 的无结果等待
+  - `Fix Planning` 的 artifact / checkpoint / approval chain
+- 它的价值不是“测试一个 helper”，而是确保从 CLI 入口到 workflow 持久化的整条链路都对后续开发者可观察、可回归、可解释。
+
+## 任务 9 架构洞察
+
+- 任务 9 最重要的结论，是把“分析阶段已经接上了”从一种实现印象，变成了一组可验证契约。只有当 `Context Resolution`、`Code Localization`、`Fix Planning` 的 artifact 和 checkpoint 都被测试锁住，这条主流程才能算真正稳定。
+
+- `Code Localization` 的等待态被当作正式 artifact 落盘，是一个很关键的架构信号。它说明“等待人工输入”也是 workflow 的正常产出，不应该被降级成日志、stderr 或临时变量。
+
+- `ExecutionContext` 与 stage artifact 的边界在任务 9 里被进一步坐实了：上下文保存当前有效态，artifact 保存详细分析正文。这让恢复、审计和后续人工补录都能共享同一个事实源，而不用在多个对象间做危险同步。
+
+- 本轮没有新增 production 代码，反而说明前面任务已经把主流程骨架搭对了。任务 9 的主要工程价值，是把这些已存在的接线关系从“隐式成立”提升为“显式受保护”，这样任务 10 才能在稳定基线上扩展人工补录入口。
+
+## v2 任务 8 当前 Requirement Brief 对外交付层
+
+任务 7 结束时，系统已经能在主流程里生成 `Requirement Synthesis` 结果，但 `run brief` 这条子工作流仍然只是“创建一个 `brief_only` run”。任务 8 的工作不是再发明一套新的 brief 逻辑，而是把已经存在的 `Requirement Synthesis` 能力真正接到子工作流入口与 renderer 出口上，让它成为可直接交付给用户的产品能力。
+
+## 新增/调整文件职责
+
+### `src/app/cli-orchestration.ts`
+
+- 这个文件继续作为 app 层的总装配点，但在任务 8 中新增了一个明确职责：把 `brief_only` run 收敛成真正的 `Requirement Brief` 子工作流，而不是只做 run 初始化。
+- `createCliRun()` 现在在 `runMode === 'brief_only'` 时会：
+  - 读取 Jira snapshot
+  - 复用 `runInitialAnalysisFlow()` 执行 `Intake -> Context Resolution -> Requirement Synthesis`
+  - 落盘 `Requirement Synthesis` stage artifact
+  - 把与 brief 子工作流无关的后续阶段统一标记为 `skipped`
+  - 在 brief 成功生成时把 run 收口为 `completed/success`
+- 同一个返回 payload 里新增 `requirementBrief`，说明 app 层现在还承担了“把结构化业务产物交给输出层”的职责，但它仍然没有自己做 CLI/Markdown 拼装，这个边界仍然留在 renderer。
+
+### `src/cli/shared.ts`
+
+- 这个文件在任务 8 之前只是一个通用 `emitCliPayload()` helper：要么打印 JSON，要么把对象 pretty-print 后写出去。
+- 现在它开始承担“同一个结构化 payload 对不同输出介质做分流”的职责：
+  - JSON 模式：继续原样输出结构化 payload
+  - 非 JSON stdout：如果 payload 内带 `requirementBrief`，就交给 `renderRequirementBriefCli()`
+  - 非 JSON `--output`：如果 payload 内带 `requirementBrief`，就交给 `renderRequirementBriefMarkdown()`
+- 这个职责放在 CLI shared 层是合理的，因为这里处理的是“命令结果如何发出去”，不是 workflow 如何生成 brief，也不是 renderer 如何组织文案。
+
+### `tests/integration/cli/run-record-commands.spec.ts`
+
+- 这个文件在任务 8 中正式承担 `Requirement Brief` 对外交付回归面：
+  - `run brief` 是否真的生成 brief，而不是停在空壳 run
+  - CLI stdout 是否展示 brief 业务字段
+  - `--output` 是否导出 Markdown
+  - unresolved requirement 是否在 CLI / Markdown 中都保持显式标记
+- 这些测试的作用不是验证某个单独 helper，而是保护“子工作流入口 -> app 装配 -> renderer 分流 -> 文件导出”的整条交付路径。
+
+## 任务 8 架构洞察
+
+- 让 `brief_only` 复用 `runInitialAnalysisFlow()`，而不是复制一份 `Requirement Brief` 生成逻辑，是这一步最重要的复用决策。这样 `run start` 和 `run brief` 至少在 `Requirement Synthesis` 之前共享同一套业务事实源，避免未来两条路径的 brief 漂移。
+
+- `createCliRun()` 返回结构化 `requirementBrief`，而 `src/cli/shared.ts` 再决定是渲染成 CLI 文本还是 Markdown，说明“业务产物”和“输出介质”已经被清楚拆开。app 层拥有产物，renderer 拥有表达方式，CLI shared 拥有分发策略。
+
+- `stdout` 和 `--output` 现在允许针对同一份 payload 采用不同表达形式，这其实是一个很关键的架构信号：文件导出不该简单复制终端视图。终端更适合快速审阅，导出文件更适合作为文档工件保存，这两者的 owner 相同，但 format 不必一致。
+
+- unresolved requirement 场景没有在 app 层额外打补丁，而是继续依赖 `Requirement Brief` 的结构化字段和 renderer 直出。这说明“未绑定需求”已经不是例外分支，而是被纳入了稳定的数据契约；CLI 和 Markdown 只是把这个契约忠实展开。
+
 ## v2 任务 7 步骤 4 当前 analysis gate 稳定性层
 
 步骤 3 已经把审批门接上了，但如果系统允许一个已经越过的审批门再次被批准、或者 revise 后仍残留旧 artifact 作为当前有效态，那主流程虽然“能跑”，却还不算稳定。步骤 4 的工作是把 analysis gate 从“可用”收敛到“可恢复、可回退、可防重复执行”。

@@ -241,7 +241,14 @@ describe('CLI run and record commands', () => {
 
   it('creates brief-only and jira-writeback-only runs without bypassing shared workflow state', async () => {
     const fakeHome = await mkdtemp(path.join(tmpdir(), 'bfo-cli-run-record-'));
-    await seedCompleteProjectProfile(fakeHome);
+    const repoPath = await mkdtemp(path.join(tmpdir(), 'bfo-cli-brief-repo-'));
+    await writeJsonAtomically(getProjectProfilePath('proj-a', fakeHome), {
+      ...createCompleteProjectProfile(),
+      repo: {
+        local_path: repoPath,
+        module_rules: [{ module_id: 'api', path_pattern: 'src/api/**' }],
+      },
+    });
     await seedJiraIssueFixture(fakeHome, 'BUG-123');
     const collector = createOutputCollector();
     const program = bootstrapCli({
@@ -268,22 +275,58 @@ describe('CLI run and record commands', () => {
     const briefOutput = JSON.parse(collector.getStdout().trim());
     const briefRunPaths = getRunPaths(briefOutput.runId, fakeHome);
     const briefContext = JSON.parse(await readFile(briefRunPaths.contextFile, 'utf8'));
+    const briefArtifactRef =
+      briefContext.stage_artifact_refs['Requirement Synthesis']?.[0] ?? null;
+    const briefArtifactPath =
+      briefArtifactRef === null
+        ? null
+        : path.join(
+            briefRunPaths.artifactsDir,
+            briefArtifactRef.replace(`artifact://${briefOutput.runId}/`, ''),
+          );
+    const briefArtifact =
+      briefArtifactPath === null
+        ? null
+        : JSON.parse(await readFile(briefArtifactPath, 'utf8'));
 
     expect(briefOutput).toMatchObject({
       command: 'run brief',
       runMode: 'brief_only',
+      currentStage: 'Requirement Synthesis',
       dryRun: true,
       dryRunArtifactTag: DRY_RUN_PERSISTENCE_POLICY.dryRunArtifactTag,
     });
     expect(briefContext).toMatchObject({
       run_mode: 'brief_only',
-      current_stage: 'Intake',
+      current_stage: 'Requirement Synthesis',
+      run_lifecycle_status: 'completed',
+      run_outcome_status: 'success',
+      requirement_refs: [
+        expect.objectContaining({
+          requirement_ref: 'REQ-100',
+          requirement_binding_status: 'resolved',
+        }),
+      ],
       stage_status_map: {
+        Intake: 'completed',
+        'Context Resolution': 'completed',
+        'Requirement Synthesis': 'completed',
         'Code Localization': 'skipped',
         'Fix Planning': 'skipped',
         Execution: 'skipped',
         'Artifact Linking': 'skipped',
         'Knowledge Recording': 'skipped',
+      },
+    });
+    expect(briefContext.stage_artifact_refs['Requirement Synthesis']).toHaveLength(1);
+    expect(briefArtifact).toMatchObject({
+      status: 'completed',
+      data: {
+        issue_key: 'BUG-123',
+        project_id: 'proj-a',
+        linked_requirement: {
+          requirement_ref: 'REQ-100',
+        },
       },
     });
 
@@ -446,6 +489,182 @@ describe('CLI run and record commands', () => {
     });
     expect(repairedOutput.runId).toEqual(expect.any(String));
     expect(repairedContext.config_version).toBe('2026-03-19');
+  });
+
+  it('renders Requirement Brief business fields in CLI mode for run brief', async () => {
+    const fakeHome = await mkdtemp(path.join(tmpdir(), 'bfo-cli-brief-render-'));
+    const repoPath = await mkdtemp(path.join(tmpdir(), 'bfo-cli-brief-render-repo-'));
+    await writeJsonAtomically(getProjectProfilePath('proj-a', fakeHome), {
+      ...createCompleteProjectProfile(),
+      repo: {
+        local_path: repoPath,
+        module_rules: [{ module_id: 'api', path_pattern: 'src/api/**' }],
+      },
+    });
+    await seedDetailedJiraIssueFixture({
+      homeDir: fakeHome,
+      issueKey: 'BUG-130',
+      summary: 'Promo stacking breaks checkout totals',
+      description: 'The API reports the wrong total when stacked discounts are present.',
+      labels: ['bug', 'module:api'],
+      requirementSources: {
+        issue_link: ['REQ-130'],
+      },
+    });
+    const collector = createOutputCollector();
+    const program = bootstrapCli({
+      io: collector.io,
+      env: {
+        ...process.env,
+        BUGFIX_ORCHESTRATOR_HOME: fakeHome,
+      },
+    });
+
+    await program.parseAsync([
+      'node',
+      'bugfix-orchestrator',
+      'run',
+      'brief',
+      '--project',
+      'proj-a',
+      '--issue',
+      'BUG-130',
+    ]);
+
+    expect(collector.getStdout()).toContain('Requirement Brief');
+    expect(collector.getStdout()).toContain('Issue: BUG-130');
+    expect(collector.getStdout()).toContain('Project: proj-a');
+    expect(collector.getStdout()).toContain('Requirement: REQ-130');
+    expect(collector.getStdout()).toContain('Requirement Binding Status: resolved');
+    expect(collector.getStdout()).toContain(
+      'Issue summary: Promo stacking breaks checkout totals',
+    );
+    expect(collector.getStdout().trim()).not.toMatch(/^\{/);
+  });
+
+  it('exports Requirement Brief as Markdown when run brief uses --output', async () => {
+    const fakeHome = await mkdtemp(path.join(tmpdir(), 'bfo-cli-brief-export-'));
+    const repoPath = await mkdtemp(path.join(tmpdir(), 'bfo-cli-brief-export-repo-'));
+    const outputPath = path.join(fakeHome, 'brief.md');
+    await writeJsonAtomically(getProjectProfilePath('proj-a', fakeHome), {
+      ...createCompleteProjectProfile(),
+      repo: {
+        local_path: repoPath,
+        module_rules: [{ module_id: 'api', path_pattern: 'src/api/**' }],
+      },
+    });
+    await seedDetailedJiraIssueFixture({
+      homeDir: fakeHome,
+      issueKey: 'BUG-131',
+      summary: 'Retry state leaks between checkout attempts',
+      description: 'Retry metadata should reset after a successful payment.',
+      labels: ['bug', 'module:api'],
+      requirementSources: {
+        issue_link: ['REQ-131'],
+      },
+    });
+    const collector = createOutputCollector();
+    const program = bootstrapCli({
+      io: collector.io,
+      env: {
+        ...process.env,
+        BUGFIX_ORCHESTRATOR_HOME: fakeHome,
+      },
+    });
+
+    await program.parseAsync([
+      'node',
+      'bugfix-orchestrator',
+      'run',
+      'brief',
+      '--project',
+      'proj-a',
+      '--issue',
+      'BUG-131',
+      '--output',
+      outputPath,
+    ]);
+
+    const exportedMarkdown = await readFile(outputPath, 'utf8');
+
+    expect(exportedMarkdown).toContain('# Requirement Brief');
+    expect(exportedMarkdown).toContain('- Issue Key: BUG-131');
+    expect(exportedMarkdown).toContain('- Project ID: proj-a');
+    expect(exportedMarkdown).toContain('- Requirement: REQ-131');
+    expect(exportedMarkdown).toContain('## Known Context');
+    expect(exportedMarkdown).toContain('Retry state leaks between checkout attempts');
+    expect(collector.getStdout()).toContain('Requirement Brief');
+    expect(collector.getStdout()).not.toContain('# Requirement Brief');
+  });
+
+  it('keeps unresolved requirement markers and binding reasons explicit in CLI and Markdown brief outputs', async () => {
+    const fakeHome = await mkdtemp(path.join(tmpdir(), 'bfo-cli-brief-unresolved-'));
+    const repoPath = await mkdtemp(path.join(tmpdir(), 'bfo-cli-brief-unresolved-repo-'));
+    const outputPath = path.join(fakeHome, 'brief-unresolved.md');
+    await writeJsonAtomically(getProjectProfilePath('proj-a', fakeHome), {
+      ...createCompleteProjectProfile(),
+      jira: {
+        ...createCompleteProjectProfile().jira,
+        requirement_link_rules: [
+          {
+            source_type: 'custom_field',
+            priority: 1,
+            fallback_action: 'unresolved',
+          },
+        ],
+      },
+      repo: {
+        local_path: repoPath,
+        module_rules: [{ module_id: 'api', path_pattern: 'src/api/**' }],
+      },
+    });
+    await seedDetailedJiraIssueFixture({
+      homeDir: fakeHome,
+      issueKey: 'BUG-132',
+      summary: 'Catalog sync misses optional discount metadata',
+      description: 'The issue carries no requirement hint and should stay unresolved.',
+      labels: ['bug', 'module:api'],
+      requirementSources: {},
+    });
+    const collector = createOutputCollector();
+    const program = bootstrapCli({
+      io: collector.io,
+      env: {
+        ...process.env,
+        BUGFIX_ORCHESTRATOR_HOME: fakeHome,
+      },
+    });
+
+    await program.parseAsync([
+      'node',
+      'bugfix-orchestrator',
+      'run',
+      'brief',
+      '--project',
+      'proj-a',
+      '--issue',
+      'BUG-132',
+      '--output',
+      outputPath,
+    ]);
+
+    const exportedMarkdown = await readFile(outputPath, 'utf8');
+
+    for (const snippet of [
+      'Requirement: Unresolved',
+      'Requirement Binding Status: unresolved',
+      'Binding Reason: No requirement hint matched the configured rules; continuing as unresolved because the fallback action allows it.',
+    ]) {
+      expect(collector.getStdout()).toContain(snippet);
+    }
+
+    for (const snippet of [
+      '- Requirement: Unresolved',
+      '- Requirement Binding Status: unresolved',
+      '- Binding Reason: No requirement hint matched the configured rules; continuing as unresolved because the fallback action allows it.',
+    ]) {
+      expect(exportedMarkdown).toContain(snippet);
+    }
   });
 
   it('persists the Jira snapshot as an Intake artifact when a run starts from an issue key', async () => {
@@ -660,6 +879,96 @@ describe('CLI run and record commands', () => {
     });
   });
 
+  it('persists the Context Resolution artifact as the workflow-owned source of project, requirement, and repo selection', async () => {
+    const fakeHome = await mkdtemp(path.join(tmpdir(), 'bfo-cli-context-resolution-'));
+    const repoPath = await mkdtemp(path.join(tmpdir(), 'bfo-cli-context-resolution-repo-'));
+    await writeRepoFixture({
+      repoPath,
+      relativePath: 'src/api/coupon-validator.ts',
+      contents: [
+        'export const validateCouponStack = () => {',
+        '  return "coupon combination submit validation for checkout api";',
+        '};',
+      ].join('\n'),
+    });
+    await writeJsonAtomically(getProjectProfilePath('proj-a', fakeHome), {
+      ...createCompleteProjectProfile(),
+      repo: {
+        local_path: repoPath,
+        module_rules: [{ module_id: 'api', path_pattern: 'src/api/**' }],
+      },
+    });
+    await seedDetailedJiraIssueFixture({
+      homeDir: fakeHome,
+      issueKey: 'BUG-140',
+      summary: 'API coupon validation rejects valid combinations',
+      description:
+        'Checkout submit fails when coupon validation runs for loyalty and campaign combinations.',
+      labels: ['bug', 'module:api'],
+      requirementSources: {
+        issue_link: ['REQ-140'],
+      },
+    });
+    const collector = createOutputCollector();
+    const program = bootstrapCli({
+      io: collector.io,
+      env: {
+        ...process.env,
+        BUGFIX_ORCHESTRATOR_HOME: fakeHome,
+      },
+    });
+
+    await program.parseAsync([
+      'node',
+      'bugfix-orchestrator',
+      'run',
+      'start',
+      '--project',
+      'proj-a',
+      '--issue',
+      'BUG-140',
+      '--json',
+    ]);
+
+    const output = JSON.parse(collector.getStdout().trim());
+    const runPaths = getRunPaths(output.runId, fakeHome);
+    const context = JSON.parse(await readFile(runPaths.contextFile, 'utf8'));
+    const contextArtifactRef = context.stage_artifact_refs['Context Resolution'][0];
+    const contextArtifact = JSON.parse(
+      await readFile(
+        path.join(
+          runPaths.artifactsDir,
+          contextArtifactRef.replace(`artifact://${output.runId}/`, ''),
+        ),
+        'utf8',
+      ),
+    );
+
+    expect(contextArtifact).toMatchObject({
+      status: 'completed',
+      waiting_for: null,
+      data: {
+        project_id: 'proj-a',
+        requirement: {
+          requirement_ref: 'REQ-140',
+          requirement_binding_status: 'resolved',
+        },
+        repo_selection: {
+          repo_path: repoPath,
+          module_candidates: ['api'],
+        },
+        requirement_source_ref: 'doc://feishu/project-a',
+        gitlab_project_id: 'group/project-a',
+        gitlab_default_branch: 'main',
+      },
+      source_refs: [
+        'jira:BUG-140',
+        'project-profile:proj-a',
+        `repo:${repoPath}`,
+      ],
+    });
+  });
+
   it('stops at analysis approval gates and only hands off to Execution after both approvals are recorded', async () => {
     const fakeHome = await mkdtemp(path.join(tmpdir(), 'bfo-cli-analysis-approval-'));
     const repoPath = await mkdtemp(path.join(tmpdir(), 'bfo-cli-analysis-approval-repo-'));
@@ -803,6 +1112,359 @@ describe('CLI run and record commands', () => {
         'Fix Planning': 'completed',
         Execution: 'waiting_external_input',
       },
+    });
+  });
+
+  it('waits at Code Localization with a persisted candidate artifact when multiple files match the bug signals', async () => {
+    const fakeHome = await mkdtemp(path.join(tmpdir(), 'bfo-cli-code-many-'));
+    const repoPath = await mkdtemp(path.join(tmpdir(), 'bfo-cli-code-many-repo-'));
+    await writeRepoFixture({
+      repoPath,
+      relativePath: 'src/api/coupon-validator.ts',
+      contents: 'export const couponValidator = "coupon combination submit validation checkout api";\n',
+    });
+    await writeRepoFixture({
+      repoPath,
+      relativePath: 'src/api/coupon-stack.ts',
+      contents: 'export const couponStack = "campaign coupon combination checkout api";\n',
+    });
+    await writeJsonAtomically(getProjectProfilePath('proj-a', fakeHome), {
+      ...createCompleteProjectProfile(),
+      repo: {
+        local_path: repoPath,
+        module_rules: [{ module_id: 'api', path_pattern: 'src/api/**' }],
+      },
+    });
+    await seedDetailedJiraIssueFixture({
+      homeDir: fakeHome,
+      issueKey: 'BUG-141',
+      summary: 'API coupon validation rejects valid combinations',
+      description:
+        'Checkout submit fails when coupon validation runs for loyalty and campaign combinations.',
+      labels: ['bug', 'module:api'],
+      requirementSources: {
+        issue_link: ['REQ-141'],
+      },
+    });
+    const collector = createOutputCollector();
+    const program = bootstrapCli({
+      io: collector.io,
+      env: {
+        ...process.env,
+        BUGFIX_ORCHESTRATOR_HOME: fakeHome,
+      },
+    });
+
+    await program.parseAsync([
+      'node',
+      'bugfix-orchestrator',
+      'run',
+      'start',
+      '--project',
+      'proj-a',
+      '--issue',
+      'BUG-141',
+      '--json',
+    ]);
+
+    const startOutput = JSON.parse(collector.getStdout().trim());
+    const runPaths = getRunPaths(startOutput.runId, fakeHome);
+    const startContext = JSON.parse(await readFile(runPaths.contextFile, 'utf8'));
+    const requirementPreviewRef =
+      startContext.stage_artifact_refs['Requirement Synthesis'][0];
+
+    collector.reset();
+    await program.parseAsync([
+      'node',
+      'bugfix-orchestrator',
+      'run',
+      'approve',
+      '--run',
+      startOutput.runId,
+      '--stage',
+      'Requirement Synthesis',
+      '--preview-ref',
+      requirementPreviewRef,
+      '--json',
+    ]);
+
+    const context = JSON.parse(await readFile(runPaths.contextFile, 'utf8'));
+    const checkpoints = await readCheckpointRecords(runPaths.checkpointsDir);
+    const codeArtifactRef = context.stage_artifact_refs['Code Localization'][0];
+    const codeArtifact = JSON.parse(
+      await readFile(
+        path.join(
+          runPaths.artifactsDir,
+          codeArtifactRef.replace(`artifact://${startOutput.runId}/`, ''),
+        ),
+        'utf8',
+      ),
+    );
+
+    expect(context).toMatchObject({
+      current_stage: 'Code Localization',
+      run_lifecycle_status: 'waiting_external_input',
+      waiting_reason: 'manual_code_target_selection',
+      stage_status_map: {
+        'Requirement Synthesis': 'completed',
+        'Code Localization': 'waiting_external_input',
+      },
+      active_approval_ref_map: {
+        'Requirement Synthesis': `approval://${startOutput.runId}/Requirement%20Synthesis`,
+      },
+    });
+    expect(context.stage_artifact_refs['Fix Planning']).toBeUndefined();
+    expect(codeArtifact).toMatchObject({
+      status: 'waiting',
+      waiting_for: 'manual_code_target_selection',
+      data: {
+        impact_modules: ['api'],
+      },
+    });
+    expect(codeArtifact.data.code_targets).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ file_path: 'src/api/coupon-stack.ts' }),
+        expect.objectContaining({ file_path: 'src/api/coupon-validator.ts' }),
+      ]),
+    );
+    expect(checkpoints.at(-1)).toMatchObject({
+      current_stage: 'Code Localization',
+      run_lifecycle_status: 'waiting_external_input',
+      active_approval_refs: [
+        `approval://${startOutput.runId}/Requirement%20Synthesis`,
+      ],
+    });
+  });
+
+  it('waits at Code Localization with a persisted empty-search artifact when no repository file matches', async () => {
+    const fakeHome = await mkdtemp(path.join(tmpdir(), 'bfo-cli-code-none-'));
+    const repoPath = await mkdtemp(path.join(tmpdir(), 'bfo-cli-code-none-repo-'));
+    await writeRepoFixture({
+      repoPath,
+      relativePath: 'src/api/refund-service.ts',
+      contents: 'export const refund = () => "refund only";\n',
+    });
+    await writeJsonAtomically(getProjectProfilePath('proj-a', fakeHome), {
+      ...createCompleteProjectProfile(),
+      repo: {
+        local_path: repoPath,
+        module_rules: [{ module_id: 'api', path_pattern: 'src/api/**' }],
+      },
+    });
+    await seedDetailedJiraIssueFixture({
+      homeDir: fakeHome,
+      issueKey: 'BUG-142',
+      summary: 'API coupon validation rejects valid combinations',
+      description:
+        'Checkout submit fails when coupon validation runs for loyalty and campaign combinations.',
+      labels: ['bug', 'module:api'],
+      requirementSources: {
+        issue_link: ['REQ-142'],
+      },
+    });
+    const collector = createOutputCollector();
+    const program = bootstrapCli({
+      io: collector.io,
+      env: {
+        ...process.env,
+        BUGFIX_ORCHESTRATOR_HOME: fakeHome,
+      },
+    });
+
+    await program.parseAsync([
+      'node',
+      'bugfix-orchestrator',
+      'run',
+      'start',
+      '--project',
+      'proj-a',
+      '--issue',
+      'BUG-142',
+      '--json',
+    ]);
+
+    const startOutput = JSON.parse(collector.getStdout().trim());
+    const runPaths = getRunPaths(startOutput.runId, fakeHome);
+    const startContext = JSON.parse(await readFile(runPaths.contextFile, 'utf8'));
+    const requirementPreviewRef =
+      startContext.stage_artifact_refs['Requirement Synthesis'][0];
+
+    collector.reset();
+    await program.parseAsync([
+      'node',
+      'bugfix-orchestrator',
+      'run',
+      'approve',
+      '--run',
+      startOutput.runId,
+      '--stage',
+      'Requirement Synthesis',
+      '--preview-ref',
+      requirementPreviewRef,
+      '--json',
+    ]);
+
+    const context = JSON.parse(await readFile(runPaths.contextFile, 'utf8'));
+    const codeArtifactRef = context.stage_artifact_refs['Code Localization'][0];
+    const codeArtifact = JSON.parse(
+      await readFile(
+        path.join(
+          runPaths.artifactsDir,
+          codeArtifactRef.replace(`artifact://${startOutput.runId}/`, ''),
+        ),
+        'utf8',
+      ),
+    );
+
+    expect(context).toMatchObject({
+      current_stage: 'Code Localization',
+      run_lifecycle_status: 'waiting_external_input',
+      waiting_reason: 'manual_code_localization',
+      stage_status_map: {
+        'Requirement Synthesis': 'completed',
+        'Code Localization': 'waiting_external_input',
+      },
+    });
+    expect(codeArtifact).toMatchObject({
+      status: 'waiting',
+      waiting_for: 'manual_code_localization',
+      data: {
+        impact_modules: ['api'],
+        code_targets: [],
+        root_cause_hypotheses: [],
+      },
+    });
+  });
+
+  it('persists Code Localization and Fix Planning artifacts into checkpoints before Execution handoff', async () => {
+    const fakeHome = await mkdtemp(path.join(tmpdir(), 'bfo-cli-fix-plan-chain-'));
+    const repoPath = await mkdtemp(path.join(tmpdir(), 'bfo-cli-fix-plan-chain-repo-'));
+    await writeRepoFixture({
+      repoPath,
+      relativePath: 'src/api/coupon-validator.ts',
+      contents: [
+        'export const validateCouponStack = () => {',
+        '  return "coupon combination submit validation for checkout api";',
+        '};',
+      ].join('\n'),
+    });
+    await writeJsonAtomically(getProjectProfilePath('proj-a', fakeHome), {
+      ...createCompleteProjectProfile(),
+      repo: {
+        local_path: repoPath,
+        module_rules: [{ module_id: 'api', path_pattern: 'src/api/**' }],
+      },
+    });
+    await seedDetailedJiraIssueFixture({
+      homeDir: fakeHome,
+      issueKey: 'BUG-143',
+      summary: 'API coupon validation rejects valid combinations',
+      description:
+        'Checkout submit fails when coupon validation runs for loyalty and campaign combinations.',
+      labels: ['bug', 'module:api'],
+      requirementSources: {
+        issue_link: ['REQ-143'],
+      },
+    });
+    const collector = createOutputCollector();
+    const program = bootstrapCli({
+      io: collector.io,
+      env: {
+        ...process.env,
+        BUGFIX_ORCHESTRATOR_HOME: fakeHome,
+      },
+    });
+
+    await program.parseAsync([
+      'node',
+      'bugfix-orchestrator',
+      'run',
+      'start',
+      '--project',
+      'proj-a',
+      '--issue',
+      'BUG-143',
+      '--json',
+    ]);
+
+    const startOutput = JSON.parse(collector.getStdout().trim());
+    const runPaths = getRunPaths(startOutput.runId, fakeHome);
+    const startContext = JSON.parse(await readFile(runPaths.contextFile, 'utf8'));
+    const requirementPreviewRef =
+      startContext.stage_artifact_refs['Requirement Synthesis'][0];
+
+    collector.reset();
+    await program.parseAsync([
+      'node',
+      'bugfix-orchestrator',
+      'run',
+      'approve',
+      '--run',
+      startOutput.runId,
+      '--stage',
+      'Requirement Synthesis',
+      '--preview-ref',
+      requirementPreviewRef,
+      '--json',
+    ]);
+
+    const postRequirementApproval = JSON.parse(
+      await readFile(runPaths.contextFile, 'utf8'),
+    );
+    const fixPlanArtifactRef =
+      postRequirementApproval.stage_artifact_refs['Fix Planning'][0];
+    const fixPlanArtifact = JSON.parse(
+      await readFile(
+        path.join(
+          runPaths.artifactsDir,
+          fixPlanArtifactRef.replace(`artifact://${startOutput.runId}/`, ''),
+        ),
+        'utf8',
+      ),
+    );
+    const checkpoints = await readCheckpointRecords(runPaths.checkpointsDir);
+
+    expect(postRequirementApproval).toMatchObject({
+      current_stage: 'Fix Planning',
+      run_lifecycle_status: 'waiting_approval',
+      code_targets: [
+        { file_path: 'src/api/coupon-validator.ts' },
+      ],
+      root_cause_hypotheses: [
+        expect.stringContaining('api'),
+      ],
+    });
+    expect(postRequirementApproval.fix_plan).toEqual(
+      expect.arrayContaining([expect.stringContaining('BUG-143')]),
+    );
+    expect(postRequirementApproval.verification_plan).toEqual(
+      expect.arrayContaining([expect.stringContaining('BUG-143')]),
+    );
+    expect(postRequirementApproval.stage_artifact_refs['Code Localization']).toHaveLength(1);
+    expect(postRequirementApproval.stage_artifact_refs['Fix Planning']).toHaveLength(1);
+    expect(fixPlanArtifact).toMatchObject({
+      status: 'completed',
+      waiting_for: null,
+      data: {
+        fix_summary: expect.stringContaining('BUG-143'),
+        referenced_code_targets: [
+          { file_path: 'src/api/coupon-validator.ts' },
+        ],
+      },
+    });
+    expect(fixPlanArtifact.data.verification_plan).toEqual(
+      expect.arrayContaining([expect.stringContaining('BUG-143')]),
+    );
+    expect(checkpoints.at(-1)).toMatchObject({
+      current_stage: 'Fix Planning',
+      run_lifecycle_status: 'waiting_approval',
+      stage_status_map: {
+        'Code Localization': 'completed',
+        'Fix Planning': 'waiting_approval',
+      },
+      active_approval_refs: [
+        `approval://${startOutput.runId}/Requirement%20Synthesis`,
+      ],
     });
   });
 

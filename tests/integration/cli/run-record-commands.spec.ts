@@ -229,6 +229,7 @@ describe('CLI run and record commands', () => {
     expect(runCommand?.helpInformation()).toContain('provide-artifact');
     expect(runCommand?.helpInformation()).toContain('provide-verification');
     expect(runCommand?.helpInformation()).toContain('bind-branch');
+    expect(runCommand?.helpInformation()).toContain('bind-requirement');
     expect(runCommand?.helpInformation()).toContain('ensure-subtask');
     expect(runCommand?.helpInformation()).toContain('provide-fix-commit');
     expect(runCommand?.helpInformation()).toContain('preview-write');
@@ -370,6 +371,181 @@ describe('CLI run and record commands', () => {
       },
     });
     expect(collector.getStderr()).toBe('');
+  });
+
+  it('accepts explicit Execution inputs when creating a jira writeback subworkflow', async () => {
+    const fakeHome = await mkdtemp(path.join(tmpdir(), 'bfo-cli-record-jira-inputs-'));
+    await seedCompleteProjectProfile(fakeHome);
+    await seedJiraIssueFixture(fakeHome, 'BUG-140');
+    const fixtureDir = await mkdtemp(
+      path.join(tmpdir(), 'bfo-cli-record-jira-input-fixtures-'),
+    );
+    const collector = createOutputCollector();
+    const program = bootstrapCli({
+      io: collector.io,
+      env: {
+        ...process.env,
+        BUGFIX_ORCHESTRATOR_HOME: fakeHome,
+      },
+    });
+    const artifactsFile = await writeJsonFixture(fixtureDir, 'artifacts.json', [
+      {
+        artifact_source: 'external_import',
+        artifact_type: 'commit',
+        project_id: 'group/project-a',
+        project_path: 'group/project-a',
+        default_branch: 'main',
+        commit_sha: 'abcdef0123456789abcdef0123456789abcdef01',
+        commit_url:
+          'https://gitlab.example.com/group/project-a/-/commit/abcdef0123456789abcdef0123456789abcdef01',
+        created_at: '2026-03-20T12:05:00.000Z',
+      },
+    ]);
+    const verificationFile = await writeJsonFixture(fixtureDir, 'verification.json', {
+      outcome: 'passed',
+      verification_summary: 'Manual regression verification completed successfully.',
+      checks: [
+        {
+          name: 'jira writeback regression',
+          status: 'passed',
+        },
+      ],
+      input_source: 'manual_cli',
+      recorded_at: '2026-03-20T12:06:00.000Z',
+    });
+
+    await program.parseAsync([
+      'node',
+      'bugfix-orchestrator',
+      'record',
+      'jira',
+      '--project',
+      'proj-a',
+      '--issue',
+      'BUG-140',
+      '--branch',
+      'bugfix/BUG-140',
+      '--artifacts-file',
+      artifactsFile,
+      '--verification-file',
+      verificationFile,
+      '--json',
+    ]);
+
+    const output = JSON.parse(collector.getStdout().trim());
+    const runPaths = getRunPaths(output.runId, fakeHome);
+    const context = JSON.parse(await readFile(runPaths.contextFile, 'utf8'));
+
+    expect(output).toMatchObject({
+      command: 'record jira',
+      exitCode: 0,
+      runMode: 'jira_writeback_only',
+      currentStage: 'Artifact Linking',
+      waitingReason: null,
+    });
+    expect(context).toMatchObject({
+      active_bug_issue_key: 'BUG-140',
+      current_stage: 'Artifact Linking',
+      run_mode: 'jira_writeback_only',
+      run_lifecycle_status: 'active',
+      waiting_reason: null,
+      requirement_refs: [
+        {
+          requirement_ref: 'REQ-100',
+          requirement_binding_status: 'resolved',
+        },
+      ],
+      gitlab_artifacts: [
+        {
+          artifact_type: 'commit',
+          commit_sha: 'abcdef0123456789abcdef0123456789abcdef01',
+        },
+      ],
+      stage_status_map: {
+        'Context Resolution': 'completed',
+        Execution: 'completed',
+        'Artifact Linking': 'not_started',
+      },
+    });
+    expect(context.git_branch_binding_ref).toMatch(/^artifact:\/\/jira\/bindings\/branch\//);
+    expect(context.verification_results_ref).toMatch(
+      /^artifact:\/\/.*\/verification-.*\.json$/,
+    );
+  });
+
+  it('accepts explicit manual summaries when creating a feishu record subworkflow', async () => {
+    const fakeHome = await mkdtemp(path.join(tmpdir(), 'bfo-cli-record-feishu-inputs-'));
+    await seedCompleteProjectProfile(fakeHome);
+    const collector = createOutputCollector();
+    const program = bootstrapCli({
+      io: collector.io,
+      env: {
+        ...process.env,
+        BUGFIX_ORCHESTRATOR_HOME: fakeHome,
+      },
+    });
+
+    await program.parseAsync([
+      'node',
+      'bugfix-orchestrator',
+      'record',
+      'feishu',
+      '--project',
+      'proj-a',
+      '--issue',
+      'BUG-141',
+      '--problem',
+      'Checkout totals drift after stacked promotions are applied.',
+      '--root-cause',
+      'The discount combiner reuses the stale subtotal between promotion passes.',
+      '--fix-summary',
+      'Recompute the subtotal before each promotion pass and normalize rounding.',
+      '--verification-summary',
+      'Manual checkout regression passed for stacked coupon scenarios.',
+      '--requirement-ref',
+      'REQ-141',
+      '--json',
+    ]);
+
+    const output = JSON.parse(collector.getStdout().trim());
+    const runPaths = getRunPaths(output.runId, fakeHome);
+    const context = JSON.parse(await readFile(runPaths.contextFile, 'utf8'));
+
+    expect(output).toMatchObject({
+      command: 'record feishu',
+      exitCode: 0,
+      runMode: 'feishu_record_only',
+      currentStage: 'Knowledge Recording',
+      waitingReason: null,
+    });
+    expect(context).toMatchObject({
+      active_bug_issue_key: 'BUG-141',
+      current_stage: 'Knowledge Recording',
+      run_mode: 'feishu_record_only',
+      requirement_refs: [
+        {
+          requirement_ref: 'REQ-141',
+          requirement_binding_status: 'resolved',
+        },
+      ],
+      root_cause_hypotheses: [
+        'The discount combiner reuses the stale subtotal between promotion passes.',
+      ],
+      fix_plan: [
+        'Recompute the subtotal before each promotion pass and normalize rounding.',
+      ],
+      verification_plan: [
+        'Manual checkout regression passed for stacked coupon scenarios.',
+      ],
+      stage_status_map: {
+        'Context Resolution': 'completed',
+        'Knowledge Recording': 'not_started',
+      },
+    });
+    expect(context.jira_issue_snapshot_ref).toBe('artifact://jira/issues/BUG-141');
+    expect(context.verification_results_ref).toMatch(
+      /^artifact:\/\/.*\/manual-verification-.*\.json$/,
+    );
   });
 
   it('requires a ready project profile before run and record commands can create runs', async () => {
@@ -966,6 +1142,649 @@ describe('CLI run and record commands', () => {
         'project-profile:proj-a',
         `repo:${repoPath}`,
       ],
+    });
+  });
+
+  it('lets operators manually select one requirement candidate when Context Resolution stops on ambiguity', async () => {
+    const fakeHome = await mkdtemp(path.join(tmpdir(), 'bfo-cli-manual-requirement-select-'));
+    const repoPath = await mkdtemp(
+      path.join(tmpdir(), 'bfo-cli-manual-requirement-select-repo-'),
+    );
+    await writeJsonAtomically(getProjectProfilePath('proj-a', fakeHome), {
+      ...createCompleteProjectProfile(),
+      repo: {
+        local_path: repoPath,
+        module_rules: [{ module_id: 'api', path_pattern: 'src/api/**' }],
+      },
+    });
+    await writeRepoFixture({
+      repoPath,
+      relativePath: 'src/api/checkout.ts',
+      contents: 'export const checkout = true;\n',
+    });
+    await seedDetailedJiraIssueFixture({
+      homeDir: fakeHome,
+      issueKey: 'BUG-250',
+      summary: 'Checkout totals are wrong',
+      description: 'Multiple linked requirements need manual selection.',
+      labels: ['bug', 'module:api'],
+      requirementSources: {
+        issue_link: ['REQ-250', 'REQ-251'],
+      },
+    });
+    const collector = createOutputCollector();
+    const program = bootstrapCli({
+      io: collector.io,
+      env: {
+        ...process.env,
+        BUGFIX_ORCHESTRATOR_HOME: fakeHome,
+      },
+    });
+
+    await program.parseAsync([
+      'node',
+      'bugfix-orchestrator',
+      'run',
+      'start',
+      '--project',
+      'proj-a',
+      '--issue',
+      'BUG-250',
+      '--json',
+    ]);
+
+    const startOutput = JSON.parse(collector.getStdout().trim());
+    expect(startOutput).toMatchObject({
+      currentStage: 'Context Resolution',
+      waitingReason: 'manual_requirement_selection',
+    });
+    collector.reset();
+
+    await program.parseAsync([
+      'node',
+      'bugfix-orchestrator',
+      'run',
+      'status',
+      '--run',
+      startOutput.runId,
+      '--json',
+    ]);
+
+    const statusOutput = JSON.parse(collector.getStdout().trim());
+    expect(statusOutput.allowedActions).toContain('run bind-requirement');
+    collector.reset();
+
+    await program.parseAsync([
+      'node',
+      'bugfix-orchestrator',
+      'run',
+      'bind-requirement',
+      '--run',
+      startOutput.runId,
+      '--requirement',
+      'REQ-251',
+      '--json',
+    ]);
+
+    const bindOutput = JSON.parse(collector.getStdout().trim());
+    const runPaths = getRunPaths(startOutput.runId, fakeHome);
+    const context = JSON.parse(await readFile(runPaths.contextFile, 'utf8'));
+
+    expect(bindOutput).toMatchObject({
+      command: 'run bind-requirement',
+      runId: startOutput.runId,
+      requirementRef: 'REQ-251',
+      currentStage: 'Context Resolution',
+      waitingReason: null,
+    });
+    expect(context).toMatchObject({
+      current_stage: 'Context Resolution',
+      run_lifecycle_status: 'active',
+      waiting_reason: null,
+      requirement_refs: [
+        {
+          requirement_ref: 'REQ-251',
+          requirement_binding_status: 'resolved',
+        },
+      ],
+      stage_status_map: {
+        'Context Resolution': 'completed',
+      },
+    });
+    expect(context.stage_artifact_refs['Context Resolution']).toHaveLength(2);
+  });
+
+  it('lets operators manually bind a requirement when no automatic mapping hint is available', async () => {
+    const fakeHome = await mkdtemp(path.join(tmpdir(), 'bfo-cli-manual-requirement-bind-'));
+    const repoPath = await mkdtemp(path.join(tmpdir(), 'bfo-cli-manual-requirement-bind-repo-'));
+    await writeJsonAtomically(getProjectProfilePath('proj-a', fakeHome), {
+      ...createCompleteProjectProfile(),
+      repo: {
+        local_path: repoPath,
+        module_rules: [{ module_id: 'api', path_pattern: 'src/api/**' }],
+      },
+    });
+    await writeRepoFixture({
+      repoPath,
+      relativePath: 'src/api/checkout.ts',
+      contents: 'export const checkout = true;\n',
+    });
+    await seedDetailedJiraIssueFixture({
+      homeDir: fakeHome,
+      issueKey: 'BUG-251',
+      summary: 'Checkout totals are wrong',
+      description: 'No requirement hint is present on the issue.',
+      labels: ['bug', 'module:api'],
+      requirementSources: {},
+    });
+    const collector = createOutputCollector();
+    const program = bootstrapCli({
+      io: collector.io,
+      env: {
+        ...process.env,
+        BUGFIX_ORCHESTRATOR_HOME: fakeHome,
+      },
+    });
+
+    await program.parseAsync([
+      'node',
+      'bugfix-orchestrator',
+      'run',
+      'start',
+      '--project',
+      'proj-a',
+      '--issue',
+      'BUG-251',
+      '--json',
+    ]);
+
+    const startOutput = JSON.parse(collector.getStdout().trim());
+    expect(startOutput).toMatchObject({
+      currentStage: 'Context Resolution',
+      waitingReason: 'manual_requirement_binding',
+    });
+    collector.reset();
+
+    await program.parseAsync([
+      'node',
+      'bugfix-orchestrator',
+      'run',
+      'bind-requirement',
+      '--run',
+      startOutput.runId,
+      '--requirement',
+      'REQ-252',
+      '--json',
+    ]);
+
+    const bindOutput = JSON.parse(collector.getStdout().trim());
+    const runPaths = getRunPaths(startOutput.runId, fakeHome);
+    const context = JSON.parse(await readFile(runPaths.contextFile, 'utf8'));
+
+    expect(bindOutput).toMatchObject({
+      command: 'run bind-requirement',
+      runId: startOutput.runId,
+      requirementRef: 'REQ-252',
+      currentStage: 'Context Resolution',
+      waitingReason: null,
+    });
+    expect(context).toMatchObject({
+      current_stage: 'Context Resolution',
+      run_lifecycle_status: 'active',
+      waiting_reason: null,
+      requirement_refs: [
+        {
+          requirement_ref: 'REQ-252',
+          requirement_binding_status: 'resolved',
+        },
+      ],
+      stage_status_map: {
+        'Context Resolution': 'completed',
+      },
+    });
+    expect(context.stage_artifact_refs['Context Resolution']).toHaveLength(2);
+  });
+
+  it('continues the main workflow from the latest checkpoint after a manual requirement selection is recorded', async () => {
+    const fakeHome = await mkdtemp(path.join(tmpdir(), 'bfo-cli-requirement-resume-main-'));
+    const repoPath = await mkdtemp(path.join(tmpdir(), 'bfo-cli-requirement-resume-main-repo-'));
+    await writeJsonAtomically(getProjectProfilePath('proj-a', fakeHome), {
+      ...createCompleteProjectProfile(),
+      repo: {
+        local_path: repoPath,
+        module_rules: [{ module_id: 'api', path_pattern: 'src/api/**' }],
+      },
+    });
+    await writeRepoFixture({
+      repoPath,
+      relativePath: 'src/api/checkout.ts',
+      contents: 'export const checkout = true;\n',
+    });
+    await seedDetailedJiraIssueFixture({
+      homeDir: fakeHome,
+      issueKey: 'BUG-260',
+      summary: 'Checkout totals are wrong',
+      description: 'Multiple linked requirements need manual selection.',
+      labels: ['bug', 'module:api'],
+      requirementSources: {
+        issue_link: ['REQ-260', 'REQ-261'],
+      },
+    });
+    const collector = createOutputCollector();
+    const program = bootstrapCli({
+      io: collector.io,
+      env: {
+        ...process.env,
+        BUGFIX_ORCHESTRATOR_HOME: fakeHome,
+      },
+    });
+
+    await program.parseAsync([
+      'node',
+      'bugfix-orchestrator',
+      'run',
+      'start',
+      '--project',
+      'proj-a',
+      '--issue',
+      'BUG-260',
+      '--json',
+    ]);
+
+    const startOutput = JSON.parse(collector.getStdout().trim());
+    collector.reset();
+
+    await program.parseAsync([
+      'node',
+      'bugfix-orchestrator',
+      'run',
+      'bind-requirement',
+      '--run',
+      startOutput.runId,
+      '--requirement',
+      'REQ-261',
+      '--json',
+    ]);
+    collector.reset();
+
+    await program.parseAsync([
+      'node',
+      'bugfix-orchestrator',
+      'run',
+      'resume',
+      '--run',
+      startOutput.runId,
+      '--json',
+    ]);
+
+    const resumeOutput = JSON.parse(collector.getStdout().trim());
+    const runPaths = getRunPaths(startOutput.runId, fakeHome);
+    const context = JSON.parse(await readFile(runPaths.contextFile, 'utf8'));
+
+    expect(resumeOutput).toMatchObject({
+      command: 'run resume',
+      runId: startOutput.runId,
+      currentStage: 'Requirement Synthesis',
+      recovery: {
+        action: 'resume_current_stage',
+      },
+    });
+    expect(context).toMatchObject({
+      current_stage: 'Requirement Synthesis',
+      run_lifecycle_status: 'waiting_approval',
+      waiting_reason: null,
+      requirement_refs: [
+        {
+          requirement_ref: 'REQ-261',
+          requirement_binding_status: 'resolved',
+        },
+      ],
+      stage_status_map: {
+        'Context Resolution': 'completed',
+        'Requirement Synthesis': 'waiting_approval',
+      },
+    });
+    expect(context.stage_artifact_refs['Requirement Synthesis']).toHaveLength(1);
+  });
+
+  it('continues a jira writeback subworkflow from the latest checkpoint after requirement binding without rebuilding the run', async () => {
+    const fakeHome = await mkdtemp(path.join(tmpdir(), 'bfo-cli-requirement-resume-record-'));
+    const repoPath = await mkdtemp(path.join(tmpdir(), 'bfo-cli-requirement-resume-record-repo-'));
+    await writeJsonAtomically(getProjectProfilePath('proj-a', fakeHome), {
+      ...createCompleteProjectProfile(),
+      repo: {
+        local_path: repoPath,
+        module_rules: [{ module_id: 'api', path_pattern: 'src/api/**' }],
+      },
+    });
+    await writeRepoFixture({
+      repoPath,
+      relativePath: 'src/api/checkout.ts',
+      contents: 'export const checkout = true;\n',
+    });
+    await seedDetailedJiraIssueFixture({
+      homeDir: fakeHome,
+      issueKey: 'BUG-261',
+      summary: 'Checkout totals are wrong',
+      description: 'Multiple linked requirements need manual selection.',
+      labels: ['bug', 'module:api'],
+      requirementSources: {
+        issue_link: ['REQ-260', 'REQ-261'],
+      },
+    });
+    const fixtureDir = await mkdtemp(
+      path.join(tmpdir(), 'bfo-cli-requirement-resume-record-fixtures-'),
+    );
+    const artifactsFile = await writeJsonFixture(fixtureDir, 'artifacts.json', [
+      {
+        artifact_source: 'external_import',
+        artifact_type: 'commit',
+        project_id: 'group/project-a',
+        project_path: 'group/project-a',
+        default_branch: 'main',
+        commit_sha: 'abcdef0123456789abcdef0123456789abcdef01',
+        commit_url:
+          'https://gitlab.example.com/group/project-a/-/commit/abcdef0123456789abcdef0123456789abcdef01',
+        created_at: '2026-03-20T14:05:00.000Z',
+      },
+    ]);
+    const verificationFile = await writeJsonFixture(fixtureDir, 'verification.json', {
+      outcome: 'passed',
+      verification_summary: 'Manual regression verification completed successfully.',
+      checks: [
+        {
+          name: 'jira writeback resume regression',
+          status: 'passed',
+        },
+      ],
+      input_source: 'manual_cli',
+      recorded_at: '2026-03-20T14:06:00.000Z',
+    });
+    const collector = createOutputCollector();
+    const program = bootstrapCli({
+      io: collector.io,
+      env: {
+        ...process.env,
+        BUGFIX_ORCHESTRATOR_HOME: fakeHome,
+      },
+    });
+
+    await program.parseAsync([
+      'node',
+      'bugfix-orchestrator',
+      'record',
+      'jira',
+      '--project',
+      'proj-a',
+      '--issue',
+      'BUG-261',
+      '--branch',
+      'bugfix/BUG-261',
+      '--artifacts-file',
+      artifactsFile,
+      '--verification-file',
+      verificationFile,
+      '--json',
+    ]);
+
+    const recordOutput = JSON.parse(collector.getStdout().trim());
+    expect(recordOutput).toMatchObject({
+      runId: expect.any(String),
+      currentStage: 'Context Resolution',
+      waitingReason: 'manual_requirement_selection',
+    });
+    collector.reset();
+
+    await program.parseAsync([
+      'node',
+      'bugfix-orchestrator',
+      'run',
+      'bind-requirement',
+      '--run',
+      recordOutput.runId,
+      '--requirement',
+      'REQ-261',
+      '--json',
+    ]);
+    collector.reset();
+
+    await program.parseAsync([
+      'node',
+      'bugfix-orchestrator',
+      'run',
+      'resume',
+      '--run',
+      recordOutput.runId,
+      '--json',
+    ]);
+
+    const resumeOutput = JSON.parse(collector.getStdout().trim());
+    const runPaths = getRunPaths(recordOutput.runId, fakeHome);
+    const context = JSON.parse(await readFile(runPaths.contextFile, 'utf8'));
+
+    expect(resumeOutput).toMatchObject({
+      command: 'run resume',
+      runId: recordOutput.runId,
+      currentStage: 'Artifact Linking',
+      recovery: {
+        action: 'resume_current_stage',
+      },
+    });
+    expect(context).toMatchObject({
+      current_stage: 'Artifact Linking',
+      run_mode: 'jira_writeback_only',
+      run_lifecycle_status: 'active',
+      waiting_reason: null,
+      requirement_refs: [
+        {
+          requirement_ref: 'REQ-261',
+          requirement_binding_status: 'resolved',
+        },
+      ],
+      gitlab_artifacts: [
+        {
+          artifact_type: 'commit',
+          commit_sha: 'abcdef0123456789abcdef0123456789abcdef01',
+        },
+      ],
+      stage_status_map: {
+        'Context Resolution': 'completed',
+        Execution: 'completed',
+        'Artifact Linking': 'not_started',
+      },
+    });
+    expect(context.git_branch_binding_ref).toMatch(/^artifact:\/\/jira\/bindings\/branch\//);
+    expect(context.verification_results_ref).toMatch(
+      /^artifact:\/\/.*\/verification-.*\.json$/,
+    );
+  });
+
+  it('does not let jira record subworkflows preview writeback before requirement mapping is resolved', async () => {
+    const fakeHome = await mkdtemp(path.join(tmpdir(), 'bfo-cli-jira-preview-gate-'));
+    const repoPath = await mkdtemp(path.join(tmpdir(), 'bfo-cli-jira-preview-gate-repo-'));
+    await writeJsonAtomically(getProjectProfilePath('proj-a', fakeHome), {
+      ...createCompleteProjectProfile(),
+      repo: {
+        local_path: repoPath,
+        module_rules: [{ module_id: 'api', path_pattern: 'src/api/**' }],
+      },
+    });
+    await writeRepoFixture({
+      repoPath,
+      relativePath: 'src/api/checkout.ts',
+      contents: 'export const checkout = true;\n',
+    });
+    await seedDetailedJiraIssueFixture({
+      homeDir: fakeHome,
+      issueKey: 'BUG-270',
+      summary: 'Checkout totals are wrong',
+      description: 'Multiple linked requirements need manual selection.',
+      labels: ['bug', 'module:api'],
+      requirementSources: {
+        issue_link: ['REQ-270', 'REQ-271'],
+      },
+    });
+    const fixtureDir = await mkdtemp(path.join(tmpdir(), 'bfo-cli-jira-preview-gate-fixtures-'));
+    const artifactsFile = await writeJsonFixture(fixtureDir, 'artifacts.json', [
+      {
+        artifact_source: 'external_import',
+        artifact_type: 'commit',
+        project_id: 'group/project-a',
+        project_path: 'group/project-a',
+        default_branch: 'main',
+        commit_sha: 'abcdef0123456789abcdef0123456789abcdef01',
+        commit_url:
+          'https://gitlab.example.com/group/project-a/-/commit/abcdef0123456789abcdef0123456789abcdef01',
+        created_at: '2026-03-20T15:05:00.000Z',
+      },
+    ]);
+    const verificationFile = await writeJsonFixture(fixtureDir, 'verification.json', {
+      outcome: 'passed',
+      verification_summary: 'Manual regression verification completed successfully.',
+      checks: [
+        {
+          name: 'jira preview gate regression',
+          status: 'passed',
+        },
+      ],
+      input_source: 'manual_cli',
+      recorded_at: '2026-03-20T15:06:00.000Z',
+    });
+    const collector = createOutputCollector();
+    const program = bootstrapCli({
+      io: collector.io,
+      env: {
+        ...process.env,
+        BUGFIX_ORCHESTRATOR_HOME: fakeHome,
+      },
+    });
+
+    await program.parseAsync([
+      'node',
+      'bugfix-orchestrator',
+      'record',
+      'jira',
+      '--project',
+      'proj-a',
+      '--issue',
+      'BUG-270',
+      '--branch',
+      'bugfix/BUG-270',
+      '--artifacts-file',
+      artifactsFile,
+      '--verification-file',
+      verificationFile,
+      '--json',
+    ]);
+
+    const recordOutput = JSON.parse(collector.getStdout().trim());
+    expect(recordOutput).toMatchObject({
+      currentStage: 'Context Resolution',
+      waitingReason: 'manual_requirement_selection',
+    });
+    collector.reset();
+
+    await program.parseAsync([
+      'node',
+      'bugfix-orchestrator',
+      'run',
+      'preview-write',
+      '--run',
+      recordOutput.runId,
+      '--stage',
+      'Artifact Linking',
+      '--json',
+      '--dry-run',
+    ]);
+
+    const previewOutput = JSON.parse(collector.getStdout().trim());
+    expect(previewOutput).toMatchObject({
+      command: 'run preview-write',
+      exitCode: 2,
+      error: {
+        category: 'validation_error',
+      },
+    });
+  });
+
+  it('requires write-stage approval before execute-write can complete a feishu record subworkflow', async () => {
+    const fakeHome = await mkdtemp(path.join(tmpdir(), 'bfo-cli-feishu-approval-gate-'));
+    await seedCompleteProjectProfile(fakeHome);
+    const collector = createOutputCollector();
+    const program = bootstrapCli({
+      io: collector.io,
+      env: {
+        ...process.env,
+        BUGFIX_ORCHESTRATOR_HOME: fakeHome,
+      },
+    });
+
+    await program.parseAsync([
+      'node',
+      'bugfix-orchestrator',
+      'record',
+      'feishu',
+      '--project',
+      'proj-a',
+      '--issue',
+      'BUG-271',
+      '--problem',
+      'Checkout totals drift after stacked promotions are applied.',
+      '--root-cause',
+      'The discount combiner reuses the stale subtotal between promotion passes.',
+      '--fix-summary',
+      'Recompute the subtotal before each promotion pass and normalize rounding.',
+      '--verification-summary',
+      'Manual checkout regression passed for stacked coupon scenarios.',
+      '--requirement-ref',
+      'REQ-271',
+      '--json',
+      '--dry-run',
+    ]);
+
+    const recordOutput = JSON.parse(collector.getStdout().trim());
+    collector.reset();
+
+    await program.parseAsync([
+      'node',
+      'bugfix-orchestrator',
+      'run',
+      'preview-write',
+      '--run',
+      recordOutput.runId,
+      '--stage',
+      'Knowledge Recording',
+      '--json',
+      '--dry-run',
+    ]);
+
+    const previewOutput = JSON.parse(collector.getStdout().trim());
+    collector.reset();
+
+    await program.parseAsync([
+      'node',
+      'bugfix-orchestrator',
+      'run',
+      'execute-write',
+      '--run',
+      recordOutput.runId,
+      '--stage',
+      'Knowledge Recording',
+      '--preview-ref',
+      previewOutput.previewRef,
+      '--confirm',
+      previewOutput.previewHash,
+      '--non-interactive',
+      '--json',
+    ]);
+
+    const executeOutput = JSON.parse(collector.getStdout().trim());
+    expect(executeOutput).toMatchObject({
+      command: 'run execute-write',
+      exitCode: 2,
+      error: {
+        category: 'validation_error',
+      },
     });
   });
 

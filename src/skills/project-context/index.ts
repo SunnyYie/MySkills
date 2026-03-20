@@ -12,6 +12,7 @@ type ResolveProjectContextInput = {
   projectProfile: ProjectProfile;
   issueSnapshot: JiraIssueSnapshot;
   manualRequirementRef?: string;
+  skipRepoInspection?: boolean;
   generatedAt?: string;
 };
 
@@ -144,6 +145,7 @@ export const resolveProjectContext = async ({
   projectProfile,
   issueSnapshot,
   manualRequirementRef,
+  skipRepoInspection = false,
   generatedAt = defaultGeneratedAt(),
 }: ResolveProjectContextInput): Promise<ProjectContextStageResult> => {
   const requirementResolution = resolveRequirement({
@@ -164,6 +166,33 @@ export const resolveProjectContext = async ({
   ];
 
   if ('error' in repoWorkspace) {
+    if (skipRepoInspection) {
+      return ProjectContextStageResultSchema.parse({
+        status: requirementResolution.status,
+        summary: requirementResolution.summary,
+        data: {
+          project_id: projectProfile.project_id,
+          requirement: requirementResolution.requirement,
+          requirement_candidates: requirementResolution.candidates,
+          repo_selection: {
+            repo_path: projectProfile.repo.local_path,
+            module_candidates: [],
+          },
+          requirement_source_ref: projectProfile.requirements.source_ref,
+          gitlab_project_id: projectProfile.gitlab.project_id,
+          gitlab_default_branch: projectProfile.gitlab.default_branch,
+        },
+        warnings: [
+          ...requirementResolution.warnings,
+          'Record-only flow skipped repo workspace inspection and used the configured repository path as context.',
+        ],
+        errors: requirementResolution.errors,
+        waiting_for: requirementResolution.waitingFor,
+        source_refs: sourceRefs,
+        generated_at: generatedAt,
+      });
+    }
+
     return ProjectContextStageResultSchema.parse({
       status: 'failed',
       summary: 'Context Resolution failed while opening the configured local repository.',

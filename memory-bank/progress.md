@@ -1,5 +1,219 @@
 # Progress
 
+## 2026-03-20 - v2 任务 10 步骤 4：确保子工作流不绕过审批门与 preview 机制
+
+### 本轮完成内容
+
+- 在 `src/app/cli-orchestration.ts` 中收紧了 write-stage 门禁：
+  - `run preview-write` 现在要求 run 当前必须真的停在目标写阶段，不能从 `Context Resolution`、`Execution` 等上游阶段直接跨过去生成 preview
+  - `run execute-write` 现在要求目标阶段已经进入 `approved_pending_write`，也就是必须先经过 preview 和 approve，不能再直接拿一个 preview ref 就执行
+- 同时把 `run approve` 对 write stages 的入口条件补齐为：
+  - `Artifact Linking` / `Knowledge Recording` 在 `output_ready` 时即可进入 approve
+  - 批准后才把阶段推进到 `approved_pending_write`
+- 在 `tests/integration/cli/run-record-commands.spec.ts` 中补齐两条任务 10 专属回归：
+  - requirement 仍未解开时，`record jira` 不能直接生成 `Artifact Linking` preview
+  - `record feishu` 在 preview 之后但 approval 之前，`execute-write` 必须失败
+- 为避免门禁修正把既有合法路径误伤，本轮额外回归了 `tests/integration/cli/writeback-flows.spec.ts`，确认“preview -> approve -> execute” 这条既有 writeback 子工作流路径仍然可用。
+
+### 依据
+
+- 用户指令：继续执行 v2 任务 10，并在每一步通过验证后同步 `progress.md` / `architecture.md`。
+- `memory-bank/features/v2/实施计划.md` 任务 10 步骤 4：
+  - 确保子工作流不绕过审批门与 preview 机制
+- `memory-bank/features/v1/需求文档.md` 与 `memory-bank/features/v1/技术方案.md`：
+  - 所有外部写操作默认先 preview，再 execute
+  - 关键节点必须允许人工确认
+  - `approve` 不能被旁路为“隐式执行”
+
+### 验证记录
+
+1. 验证对象：任务 10 步骤 4 red 阶段
+   触发方式：先在 `tests/integration/cli/run-record-commands.spec.ts` 增加“未解 requirement 不能 preview”“未 approve 不能 execute”断言，再运行 `npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts`
+   预期结果：实现前准确暴露 `preview-write` 和 `execute-write` 都还缺少对应门禁
+   实际结果：通过；red 阶段失败点为两个命令都返回 `exitCode 0`
+
+2. 验证对象：任务 10 步骤 4 green 阶段
+   触发方式：实现 write-stage preview / approve / execute 门禁后运行 `npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts tests/integration/cli/writeback-flows.spec.ts`
+   预期结果：违规路径被拦下，合法的 `preview -> approve -> execute` 子工作流仍然通过
+   实际结果：通过；integration 全量 `33/33` 通过
+
+3. 验证对象：任务 10 步骤 4 类型边界
+   触发方式：运行 `npm run typecheck`
+   预期结果：新增 write-stage 门禁和批准条件在类型上保持闭合
+   实际结果：通过；`typecheck` 退出码为 0
+
+4. 验证对象：任务 10 步骤 4 文档同步结果
+   触发方式：更新 `progress.md` / `architecture.md` 后运行 `npm run test:milestones -- tests/milestones/document-consistency.spec.ts`
+   预期结果：新增任务 10 步骤 4 记录不破坏文档一致性检查
+   实际结果：通过；milestones 全量 `3/3` 通过
+
+### 当前边界说明
+
+- 到步骤 4 为止，任务 10 要求的四个子能力已经全部落地：
+  - record-only 最小输入补录
+  - requirement manual override / selection CLI
+  - requirement 补录后的 checkpoint continue
+  - 子工作流 preview / approval / execute 门禁
+- 本轮仍未进入任务 11，因此真实 preview / execute payload、Bugfix Report 导出和缺失 skill 收尾保持当前边界。
+
+## 2026-03-20 - v2 任务 10 步骤 3：补录后从最近 checkpoint 继续，而不是重建 run
+
+### 本轮完成内容
+
+- 在 `src/app/cli-orchestration.ts` 中增强了 `run resume`：
+  - 当最新 durable 状态是“`Context Resolution` 已完成、waiting 已清空、但下游阶段尚未继续”时，`run resume` 不再只返回 recovery 提示，而会基于同一个 `run_id` 和最新 checkpoint 继续推进一小步
+  - `full` / `brief_only` run 会从最新 `Context Resolution` artifact 继续进入 `Requirement Synthesis`
+  - `jira_writeback_only` run 会读取已暂存的 branch / artifact / verification 输入，把同一个 run 推进回 `Execution` 或 `Artifact Linking`
+  - `feishu_record_only` run 会把 requirement 已解决后的 run 推回 `Knowledge Recording`
+- 同时补齐 `record jira` 在 requirement 仍未解决时的“前置输入暂存”语义：
+  - 若 `Context Resolution` 仍停在 `manual_requirement_selection` / `manual_requirement_binding`，显式提供的 branch、GitLab artifact、verification 不再被丢弃
+  - 它们会先写入当前 run 的有效上下文，等待 requirement 绑定完成后由 `run resume` 继续消费
+- 在 `tests/integration/cli/run-record-commands.spec.ts` 中补齐两条关键回归：
+  - 主流程 requirement 人工选择后，`run resume` 会推进到 `Requirement Synthesis` 审批门
+  - `record jira` requirement 歧义时，先暂存显式输入，绑定后再用同一个 `run_id` 继续到 `Artifact Linking`
+
+### 依据
+
+- 用户指令：任务 10 每一步都需先验证，再同步进度和架构说明。
+- `memory-bank/features/v2/实施计划.md` 任务 10 步骤 3：
+  - 让补录完成后可从最近 checkpoint 继续，而不是重建整个 run
+- `memory-bank/features/v1/需求文档.md`：
+  - 流程中断或等待补录后，应能从最近持久化 checkpoint 恢复继续
+- `memory-bank/features/v1/技术方案.md`：
+  - checkpoint 必须是恢复与继续执行的唯一 durable 依据
+  - 子工作流和主流程都必须继续复用统一生命周期语义
+
+### 验证记录
+
+1. 验证对象：任务 10 步骤 3 red 阶段
+   触发方式：先在 `tests/integration/cli/run-record-commands.spec.ts` 增加“手工绑定 requirement 后 resume”与“record jira 歧义 requirement 后同 run continue”断言，再运行 `npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts`
+   预期结果：实现前准确暴露 `run resume` 只会返回恢复提示，不会实际推进下游阶段
+   实际结果：通过；red 阶段失败点为 `run resume` 返回的 `currentStage` 仍停在 `Context Resolution`
+
+2. 验证对象：任务 10 步骤 3 green 阶段
+   触发方式：实现 requirement 补录后的 checkpoint continue 与 record-only 输入暂存后运行 `npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts`
+   预期结果：主流程 requirement 绑定后能进入 `Requirement Synthesis`；`record jira` requirement 绑定后能在同一 run 上进入 `Artifact Linking`
+   实际结果：通过；integration 全量 `31/31` 通过
+
+3. 验证对象：任务 10 步骤 3 类型边界
+   触发方式：运行 `npm run typecheck`
+   预期结果：新增 resume continue 逻辑与暂存输入逻辑在类型上保持闭合
+   实际结果：通过；`typecheck` 退出码为 0
+
+4. 验证对象：任务 10 步骤 3 文档同步结果
+   触发方式：更新 `progress.md` / `architecture.md` 后运行 `npm run test:milestones -- tests/milestones/document-consistency.spec.ts`
+   预期结果：新增任务 10 步骤 3 记录不破坏文档一致性检查
+   实际结果：通过；milestones 全量 `3/3` 通过
+
+### 当前边界说明
+
+- 到步骤 3 为止，requirement 补录已经不再是“只改一个中间态 artifact”；它已经能驱动主流程和 `record jira` 子工作流在同一个 run 上继续前进。
+- 本轮没有进入任务 10 步骤 4，因此对子工作流 preview / approval 不绕过语义的额外回归保护仍待补齐。
+- 本轮没有进入任务 11，因此真实 preview / execute、Bugfix Report 导出和缺失 skill 收尾仍保持当前边界。
+
+## 2026-03-20 - v2 任务 10 步骤 2：补齐 requirement manual override / selection CLI 入口
+
+### 本轮完成内容
+
+- 在 `src/cli/run/register.ts` 与 `src/app/cli-orchestration.ts` 中新增 `run bind-requirement`：
+  - 统一用于 `manual_requirement_selection` 和 `manual_requirement_binding` 两类等待态
+  - 当当前 run 停在 `Context Resolution` 时，允许操作员显式提交目标 requirement ref
+- 在 `src/app/cli-orchestration.ts` 中补齐了手工 requirement 绑定的关键校验与持久化语义：
+  - 只有 `Context Resolution + waiting_external_input` 才允许调用该命令
+  - 若当前是 `manual_requirement_selection`，则提交值必须属于当前持久化 artifact 中的候选 requirement 列表
+  - 绑定成功后，重新生成新的 `Context Resolution` artifact，并把当前有效 `requirement_refs` 更新为 resolved 状态
+- 在 `buildStatusSummary()` 中把 `run bind-requirement` 暴露为 `Context Resolution` requirement 等待态下的 allowed action，避免用户只能靠猜命令名操作。
+- 在 `tests/integration/cli/run-record-commands.spec.ts` 中补齐两条集成回归：
+  - 多候选 requirement 场景下，`run status` 会暴露 `run bind-requirement`，且命令可选择候选项并清除等待态
+  - 无自动 hint 场景下，`run bind-requirement` 可显式手工绑定 requirement，并生成第二份 `Context Resolution` artifact
+
+### 依据
+
+- 用户指令：执行 v2 任务 10，并在每一步通过验证后同步 `progress.md` / `architecture.md`。
+- `memory-bank/features/v2/实施计划.md` 任务 10 步骤 2：
+  - 为 requirement mapping 歧义或失败场景新增 manual override / selection CLI 入口
+- `memory-bank/features/v1/需求文档.md`：
+  - 需求映射失败后应允许人工补录，而不是强制从头重建 run
+- `memory-bank/features/v1/技术方案.md`：
+  - 子工作流与主流程都必须继续复用统一状态机、artifact 和 checkpoint 语义
+
+### 验证记录
+
+1. 验证对象：任务 10 步骤 2 red 阶段
+   触发方式：先在 `tests/integration/cli/run-record-commands.spec.ts` 增加 `bind-requirement` help/status/行为断言，再运行 `npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts`
+   预期结果：实现前准确暴露 CLI 未注册 `bind-requirement`，且 `run status` 不会暴露对应 allowed action
+   实际结果：通过；red 阶段失败点分别为 run help 缺少该命令、`allowedActions` 缺少 `run bind-requirement`、以及 commander 报 unknown command
+
+2. 验证对象：任务 10 步骤 2 green 阶段
+   触发方式：实现 `run bind-requirement` 入口、候选校验与 artifact 重写后运行 `npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts`
+   预期结果：多候选与无自动 hint 两类场景都可在既有 run 上完成 requirement 绑定，且等待态被清除
+   实际结果：通过；integration 全量 `29/29` 通过
+
+3. 验证对象：任务 10 步骤 2 类型边界
+   触发方式：运行 `npm run typecheck`
+   预期结果：新增 CLI 命令与 app 装配在类型上保持闭合
+   实际结果：通过；`typecheck` 退出码为 0
+
+4. 验证对象：任务 10 步骤 2 文档同步结果
+   触发方式：更新 `progress.md` / `architecture.md` 后运行 `npm run test:milestones -- tests/milestones/document-consistency.spec.ts`
+   预期结果：新增任务 10 步骤 2 记录不破坏文档一致性检查
+   实际结果：通过；milestones 全量 `3/3` 通过
+
+### 当前边界说明
+
+- 到步骤 2 为止，requirement mapping 的人工 override / selection 已经被正式纳入 CLI 闭环，但绑定成功后还不会自动继续跑下游阶段。
+- 本轮没有进入任务 10 步骤 3，因此 requirement 补录后的“从最近 checkpoint 继续”体验仍待实现。
+- 本轮没有进入任务 10 步骤 4，因此 record-only 子工作流在补录后对 preview / approval 的进一步收口还没有新增回归保护。
+
+## 2026-03-20 - v2 任务 10 步骤 1：为 `record jira` / `record feishu` 补齐最小前置输入补录
+
+### 本轮完成内容
+
+- 在 `src/cli/record/register.ts` 为两个独立子工作流入口补齐显式补录参数：
+  - `record jira` 新增 `--branch`、`--artifacts-file`、`--verification-file`
+  - `record feishu` 新增 `--issue`、`--requirement-ref`、`--problem`、`--root-cause`、`--fix-summary`、`--verification-summary`、`--verification-outcome`
+- 在 `src/app/cli-orchestration.ts` 把 `record` 从“只初始化最小 run”扩展成“可带最小前置输入初始化子工作流上下文”：
+  - `record jira` 在显式提供 Execution 输入时，会补齐 Jira snapshot / `Context Resolution`，再把 branch、GitLab artifact、verification 直接记入当前 run，而不是要求用户先建 run 再手动串三条命令
+  - `record feishu` 在显式提供人工摘要时，会补齐手工 Jira snapshot、手工 verification artifact，以及 `root_cause_hypotheses` / `fix_plan` / `verification_plan`
+- 在 `src/skills/project-context/index.ts` 为 record-only 路径补了 `skipRepoInspection` 开关，使子工作流的最小前置输入补录不再错误依赖本地 repo 可打开性；该路径仍保留 requirement binding 语义，但不强制做代码仓定位。
+- 在 `tests/integration/cli/run-record-commands.spec.ts` 补齐两条集成契约：
+  - `record jira` 直接带 Execution 输入后会停在 `Artifact Linking` 前，而不是回退成空壳 run
+  - `record feishu` 直接带人工摘要后会形成可继续预览的 `Knowledge Recording` 子工作流上下文
+
+### 依据
+
+- 用户指令：继续执行 `memory-bank/features/v2/实施计划.md` 的任务 10；每完成一个步骤都先测试，测试通过后记录 `progress.md`，并同步架构洞察。
+- `memory-bank/features/v2/实施计划.md` 任务 10 步骤 1：
+  - 为 `record jira`、`record feishu` 补齐最小前置输入的显式补录能力
+- `memory-bank/features/v1/技术方案.md`：
+  - `record` 是“独立补写”的快捷入口，但不能绕开统一 workflow 生命周期
+  - 子工作流的最小前置输入不应强依赖完整主流程或现成 run/checkpoint
+- `memory-bank/features/v1/需求文档.md`：
+  - 若用户未从既有 run/checkpoint 恢复，系统必须允许对子工作流最小输入进行手工补录
+
+### 验证记录
+
+1. 验证对象：任务 10 步骤 1 red 阶段
+   触发方式：先在 `tests/integration/cli/run-record-commands.spec.ts` 新增 `record jira` / `record feishu` 显式补录测试，再运行 `npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts`
+   预期结果：实现前准确暴露 CLI 尚未接受这些显式补录选项
+   实际结果：通过；red 阶段失败点为 `commander` 报 unknown option，说明缺口确实在 CLI / app 装配层
+
+2. 验证对象：任务 10 步骤 1 green 阶段
+   触发方式：实现 record-only 输入补录与最小上下文装配后运行 `npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts`
+   预期结果：`record jira` 能直接吸收 branch / artifact / verification，`record feishu` 能直接吸收人工摘要输入，且都不绕过后续 preview / approve / execute 门
+   实际结果：通过；integration 全量 `27/27` 通过
+
+3. 验证对象：任务 10 步骤 1 文档同步结果
+   触发方式：更新 `progress.md` / `architecture.md` 后运行 `npm run test:milestones -- tests/milestones/document-consistency.spec.ts`
+   预期结果：新增任务 10 步骤 1 记录不破坏现有文档一致性检查
+   实际结果：通过；milestones 全量 `3/3` 通过
+
+### 当前边界说明
+
+- 到步骤 1 为止，`record jira` / `record feishu` 已具备“显式带最小前置输入创建子工作流 run”的能力，但 requirement mapping 的人工 override / selection CLI 入口还没有接上。
+- 本轮没有进入任务 10 步骤 2，因此 requirement mapping 歧义或失败场景仍不能通过专门 CLI 命令在既有 run 上完成绑定与候选选择。
+- 本轮没有进入任务 10 步骤 3 / 4，因此补录后的 checkpoint 继续体验和“子工作流不绕过审批门 / preview”的进一步收口仍待后续步骤补齐。
+
 ## 2026-03-20 - v2 任务 9：冻结代码定位与修复计划主流程接线契约
 
 ### 本轮完成内容

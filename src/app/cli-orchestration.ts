@@ -8,12 +8,15 @@ import {
   ExecutionContextSchema,
   JiraIssueSnapshotSchema,
   ProjectContextStageResultSchema,
+  RequirementReferenceSchema,
   RequirementSynthesisStageResultSchema,
   StructuredErrorSchema,
   VerificationResultSchema,
   type CheckpointRecord,
   type ExecutionContext,
+  type JiraIssueSnapshot,
   type GitLabArtifact,
+  type ProjectContextStageResult,
   type RequirementBrief,
   type VerificationResult,
 } from '../domain/index.js';
@@ -27,7 +30,12 @@ import {
   ProjectProfileValidationError,
   loadProjectProfile,
 } from '../skills/config-loader/index.js';
-import { readJiraIssueSnapshot } from '../infrastructure/connectors/index.js';
+import { resolveProjectContext } from '../skills/project-context/index.js';
+import { synthesizeRequirementBrief } from '../skills/requirement-summarizer/index.js';
+import {
+  buildJiraIssueSnapshot,
+  readJiraIssueSnapshot,
+} from '../infrastructure/connectors/index.js';
 import {
   DRY_RUN_PERSISTENCE_POLICY,
   getCheckpointFilePath,
@@ -68,6 +76,15 @@ type RecordSubworkflowInput = CommonCommandOptions & {
   projectId: string;
   issueKey?: string;
   workflow: 'jira' | 'feishu';
+  branchName?: string;
+  artifactFile?: string;
+  verificationFile?: string;
+  requirementRef?: string;
+  problemSummary?: string;
+  rootCauseSummary?: string;
+  fixSummary?: string;
+  verificationSummary?: string;
+  verificationOutcome?: 'passed' | 'failed' | 'mixed';
 };
 
 type RunStatusInput = HomeDirOptions & {
@@ -435,6 +452,14 @@ const buildStatusSummary = (context: ExecutionContext) => {
   }
 
   if (context.run_lifecycle_status === 'waiting_external_input') {
+    if (
+      context.current_stage === 'Context Resolution' &&
+      (context.waiting_reason === 'manual_requirement_selection' ||
+        context.waiting_reason === 'manual_requirement_binding')
+    ) {
+      allowedActions.add('run bind-requirement');
+    }
+
     const missingInputs =
       context.current_stage === EXECUTION_STAGE
         ? getExecutionExternalInputState(context).missingInputs
@@ -538,6 +563,151 @@ const applyRunModePreset = (
 
   return nextContext;
 };
+
+const isCliFailure = (
+  result: unknown,
+): result is CliCommandFailure =>
+  typeof result === 'object' && result !== null && 'error' in result;
+
+const buildProjectContextPatch = (
+  stageResult: ProjectContextStageResult,
+) =>
+  stageResult.status === 'completed' && stageResult.data
+    ? {
+        requirement_refs: [stageResult.data.requirement],
+        repo_selection: stageResult.data.repo_selection,
+      }
+    : {};
+
+const persistRecordContextResolution = async ({
+  runId,
+  context,
+  projectProfile,
+  issueSnapshot,
+  requirementRef,
+  skipRepoInspection = true,
+  homeDir,
+}: {
+  runId: string;
+  context: ExecutionContext;
+  projectProfile: Awaited<ReturnType<typeof loadRequiredProjectProfile>>;
+  issueSnapshot: JiraIssueSnapshot;
+  requirementRef?: string;
+  skipRepoInspection?: boolean;
+  homeDir?: string;
+}) => {
+  const contextResolution = await resolveProjectContext({
+    projectProfile,
+    issueSnapshot,
+    manualRequirementRef: requirementRef?.trim() || undefined,
+    skipRepoInspection,
+  });
+  const persisted = await persistAnalysisStageExecutions({
+    runId,
+    context,
+    stageExecutions: [
+      {
+        stage: 'Context Resolution',
+        result: contextResolution,
+        contextPatch: buildProjectContextPatch(contextResolution),
+      },
+    ],
+    homeDir,
+  });
+
+  return {
+    context: persisted.context,
+    checkpointId: persisted.checkpointId,
+    stageResult: contextResolution,
+  };
+};
+
+const createManualRequirementReference = (requirementRef?: string) =>
+  RequirementReferenceSchema.parse(
+    requirementRef?.trim()
+      ? {
+          requirement_id: null,
+          requirement_ref: requirementRef.trim(),
+          requirement_binding_status: 'resolved',
+          binding_reason: 'Resolved from explicit manual override.',
+        }
+      : {
+          requirement_id: null,
+          requirement_ref: null,
+          requirement_binding_status: 'unresolved',
+          binding_reason:
+            'No requirement hint matched the configured rules; manual binding is required before continuing.',
+        },
+  );
+
+const createManualIssueSnapshot = ({
+  projectProfile,
+  issueKey,
+  problemSummary,
+  requirementRef,
+}: {
+  projectProfile: Awaited<ReturnType<typeof loadRequiredProjectProfile>>;
+  issueKey: string;
+  problemSummary: string;
+  requirementRef?: string;
+}) =>
+  buildJiraIssueSnapshot({
+    projectProfile,
+    rawIssue: {
+      issue_key: issueKey,
+      issue_id: `manual-${issueKey}`,
+      issue_type_id: projectProfile.jira.issue_type_ids[0] ?? 'manual',
+      project_key: projectProfile.jira.project_key,
+      summary: problemSummary,
+      description: problemSummary,
+      status_name: 'Manual Record Input',
+      labels: ['manual-record'],
+      requirement_sources: requirementRef?.trim()
+        ? {
+            manual: [requirementRef.trim()],
+          }
+        : {},
+    },
+  });
+
+const persistManualVerificationArtifact = async ({
+  runId,
+  stage,
+  summary,
+  outcome = 'passed',
+  homeDir,
+}: {
+  runId: string;
+  stage: (typeof BUGFIX_STAGES)[number];
+  summary: string;
+  outcome?: 'passed' | 'failed' | 'mixed';
+  homeDir?: string;
+}) =>
+  persistArtifactDocument({
+    runId,
+    stage,
+    kind: 'manual-verification',
+    payload: VerificationResultSchema.parse({
+      outcome,
+      verification_summary: summary.trim(),
+      checks: [
+        {
+          name: 'manual summary',
+          status: outcome === 'failed' ? 'failed' : 'passed',
+        },
+      ],
+      input_source: 'manual_cli',
+      recorded_at: new Date().toISOString(),
+    }),
+    homeDir,
+  });
+
+const canContinueFromResolvedRequirementCheckpoint = (
+  context: ExecutionContext,
+) =>
+  context.current_stage === 'Context Resolution' &&
+  context.stage_status_map['Context Resolution'] === 'completed' &&
+  context.waiting_reason === null;
 
 const wrapCommand = async <T>(command: string, work: () => Promise<T>) => {
   try {
@@ -766,12 +936,21 @@ export const createCliRecordRun = async ({
   projectId,
   issueKey,
   workflow,
+  branchName,
+  artifactFile,
+  verificationFile,
+  requirementRef,
+  problemSummary,
+  rootCauseSummary,
+  fixSummary,
+  verificationSummary,
+  verificationOutcome = 'passed',
   homeDir,
   dryRun = false,
   nonInteractive = false,
   initiator = DEFAULT_INITIATOR,
-}: RecordSubworkflowInput) =>
-  createCliRun({
+}: RecordSubworkflowInput) => {
+  const baseResult = await createCliRun({
     projectId,
     issueKey:
       issueKey ??
@@ -782,17 +961,313 @@ export const createCliRecordRun = async ({
     dryRun,
     nonInteractive,
     initiator,
-  }).then((result) =>
-    'error' in result
-      ? {
-          ...result,
-          command: `record ${workflow}`,
-        }
-      : {
-          ...result,
-          command: `record ${workflow}`,
-        },
+  });
+
+  if (isCliFailure(baseResult)) {
+    return {
+      ...baseResult,
+      command: `record ${workflow}`,
+    };
+  }
+
+  let lastCheckpointId = baseResult.checkpointId;
+  const runId = baseResult.runId;
+
+  if (workflow === 'jira') {
+    const hasExplicitExecutionInputs = Boolean(
+      branchName?.trim() || artifactFile || verificationFile,
+    );
+
+    if (!hasExplicitExecutionInputs) {
+      return {
+        ...baseResult,
+        command: 'record jira',
+      };
+    }
+
+    const projectProfile = await loadRequiredProjectProfile(projectId, homeDir);
+    const { context: initialContext } = await loadContext(runId, homeDir);
+    const issueSnapshot = JiraIssueSnapshotSchema.parse(
+      await readPersistedArtifact({
+        runId,
+        artifactRef: initialContext.jira_issue_snapshot_ref,
+        homeDir,
+      }),
+    );
+    const contextResolution = await persistRecordContextResolution({
+      runId,
+      context: initialContext,
+      projectProfile,
+      issueSnapshot,
+      homeDir,
+    });
+
+    lastCheckpointId = contextResolution.checkpointId ?? lastCheckpointId;
+
+    if (contextResolution.stageResult.status !== 'completed') {
+      let stagedContext = contextResolution.context;
+
+      if (branchName?.trim() || artifactFile || verificationFile) {
+        const deferredBranchBinding = branchName?.trim()
+          ? await persistBranchBindingArtifact({
+              runId,
+              issueKey: issueKey?.trim() ?? issueSnapshot.issue_key,
+              branchName: branchName.trim(),
+              homeDir,
+            })
+          : null;
+        const deferredArtifacts = artifactFile
+          ? await parseArtifactFile(artifactFile)
+          : [];
+        const deferredVerificationArtifact = verificationFile
+          ? await persistArtifactDocument({
+              runId,
+              stage: EXECUTION_STAGE,
+              kind: 'verification',
+              payload: VerificationResultSchema.parse(
+                JSON.parse(await readFile(verificationFile, 'utf8')),
+              ) as VerificationResult,
+              homeDir,
+            })
+          : null;
+        const deferred = await updateRun(
+          runId,
+          homeDir,
+          'jira_record_execution_inputs_staged',
+          async (currentContext) => {
+            const nextExecutionContext = recordExecutionExternalInputs({
+              context: currentContext,
+              updatedAt: new Date().toISOString(),
+              gitlabArtifacts: deferredArtifacts,
+              verificationResultsRef: deferredVerificationArtifact?.artifactRef,
+              branchBindingRef: deferredBranchBinding?.artifactRef,
+            }).context;
+
+            return {
+              ...nextExecutionContext,
+              current_stage: currentContext.current_stage,
+              run_lifecycle_status: currentContext.run_lifecycle_status,
+              waiting_reason: currentContext.waiting_reason,
+            };
+          },
+        );
+
+        stagedContext = deferred.context;
+        lastCheckpointId = deferred.checkpoint.checkpoint_id;
+      }
+
+      return {
+        ...baseResult,
+        command: 'record jira',
+        currentStage: stagedContext.current_stage,
+        checkpointId: lastCheckpointId,
+        waitingReason: stagedContext.waiting_reason,
+      };
+    }
+
+    const advanced = await updateRun(
+      runId,
+      homeDir,
+      'jira_record_execution_initialized',
+      async (context) => {
+        const executionState = getExecutionExternalInputState(context);
+
+        return {
+          ...context,
+          updated_at: new Date().toISOString(),
+          current_stage: EXECUTION_STAGE,
+          run_lifecycle_status: executionState.runLifecycleStatus,
+          waiting_reason: executionState.waitingReason,
+          stage_status_map: {
+            ...context.stage_status_map,
+            Execution: executionState.stageStatus,
+            [ARTIFACT_LINKING_STAGE]: 'not_started',
+          },
+        };
+      },
+    );
+
+    lastCheckpointId = advanced.checkpoint.checkpoint_id;
+
+    if (branchName?.trim()) {
+      const branchResult = await bindCliRunBranch({
+        runId,
+        branchName: branchName.trim(),
+        issueKey,
+        homeDir,
+        dryRun,
+        nonInteractive,
+      });
+
+      if (isCliFailure(branchResult)) {
+        return branchResult;
+      }
+
+      lastCheckpointId = branchResult.checkpointId;
+    }
+
+    if (artifactFile) {
+      const artifactResult = await provideCliArtifacts({
+        runId,
+        artifactFile,
+        homeDir,
+        dryRun,
+        nonInteractive,
+      });
+
+      if (isCliFailure(artifactResult)) {
+        return artifactResult;
+      }
+
+      lastCheckpointId = artifactResult.checkpointId;
+    }
+
+    if (verificationFile) {
+      const verificationResult = await provideCliVerification({
+        runId,
+        verificationFile,
+        homeDir,
+        dryRun,
+        nonInteractive,
+      });
+
+      if (isCliFailure(verificationResult)) {
+        return verificationResult;
+      }
+
+      lastCheckpointId = verificationResult.checkpointId;
+    }
+
+    const { context: finalContext } = await loadContext(runId, homeDir);
+
+    return {
+      ...baseResult,
+      command: 'record jira',
+      currentStage: finalContext.current_stage,
+      checkpointId: lastCheckpointId,
+      waitingReason: finalContext.waiting_reason,
+    };
+  }
+
+  const hasManualFeishuInputs = Boolean(
+    issueKey?.trim() ||
+      requirementRef?.trim() ||
+      problemSummary?.trim() ||
+      rootCauseSummary?.trim() ||
+      fixSummary?.trim() ||
+      verificationSummary?.trim(),
   );
+
+  if (!hasManualFeishuInputs) {
+    return {
+      ...baseResult,
+      command: 'record feishu',
+    };
+  }
+
+  if (
+    !problemSummary?.trim() ||
+    !rootCauseSummary?.trim() ||
+    !fixSummary?.trim() ||
+    !verificationSummary?.trim()
+  ) {
+    return validationError(
+      'record feishu',
+      'problem, root cause, fix summary, and verification summary are required when creating a manual Feishu record run.',
+      'Provide --problem, --root-cause, --fix-summary, and --verification-summary together.',
+    );
+  }
+
+  const projectProfile = await loadRequiredProjectProfile(projectId, homeDir);
+  const manualIssueKey = issueKey?.trim() || 'FEISHU-RECORD-ONLY';
+  const manualSnapshot = createManualIssueSnapshot({
+    projectProfile,
+    issueKey: manualIssueKey,
+    problemSummary: problemSummary.trim(),
+    requirementRef,
+  });
+  const persistedSnapshot = await persistJiraIssueSnapshotArtifact({
+    runId,
+    issueKey: manualIssueKey,
+    snapshot: manualSnapshot,
+    homeDir,
+  });
+  const snapshotUpdated = await updateRun(
+    runId,
+    homeDir,
+    'feishu_record_manual_snapshot_recorded',
+    async (context) => ({
+      ...context,
+      updated_at: new Date().toISOString(),
+      active_bug_issue_key: manualIssueKey,
+      jira_issue_snapshot_ref: persistedSnapshot.artifactRef,
+      stage_artifact_refs: {
+        ...context.stage_artifact_refs,
+        Intake: [persistedSnapshot.artifactRef],
+      },
+    }),
+  );
+
+  lastCheckpointId = snapshotUpdated.checkpoint.checkpoint_id;
+
+  const contextResolution = await persistRecordContextResolution({
+    runId,
+    context: snapshotUpdated.context,
+    projectProfile,
+    issueSnapshot: manualSnapshot,
+    requirementRef,
+    homeDir,
+  });
+
+  lastCheckpointId = contextResolution.checkpointId ?? lastCheckpointId;
+
+  if (contextResolution.stageResult.status !== 'completed') {
+    return {
+      ...baseResult,
+      command: 'record feishu',
+      currentStage: contextResolution.context.current_stage,
+      checkpointId: lastCheckpointId,
+      waitingReason: contextResolution.context.waiting_reason,
+    };
+  }
+
+  const verificationArtifact = await persistManualVerificationArtifact({
+    runId,
+    stage: KNOWLEDGE_RECORDING_STAGE,
+    summary: verificationSummary.trim(),
+    outcome: verificationOutcome,
+    homeDir,
+  });
+  const finalized = await updateRun(
+    runId,
+    homeDir,
+    'feishu_record_manual_inputs_recorded',
+    async (context) => ({
+      ...context,
+      updated_at: new Date().toISOString(),
+      active_bug_issue_key: manualIssueKey,
+      current_stage: KNOWLEDGE_RECORDING_STAGE,
+      waiting_reason: null,
+      requirement_refs: [createManualRequirementReference(requirementRef)],
+      root_cause_hypotheses: [rootCauseSummary.trim()],
+      fix_plan: [fixSummary.trim()],
+      verification_plan: [verificationSummary.trim()],
+      verification_results_ref: verificationArtifact.artifactRef,
+      stage_status_map: {
+        ...context.stage_status_map,
+        [KNOWLEDGE_RECORDING_STAGE]: 'not_started',
+      },
+    }),
+  );
+
+  return {
+    ...baseResult,
+    command: 'record feishu',
+    currentStage: finalized.context.current_stage,
+    checkpointId: finalized.checkpoint.checkpoint_id,
+    waitingReason: finalized.context.waiting_reason,
+  };
+};
 
 export const getCliRunStatus = async ({ runId, checkpointId, homeDir }: RunStatusInput) =>
   wrapCommand('run status', async () => {
@@ -828,12 +1303,152 @@ export const resumeCliRun = async ({ runId, checkpointId, homeDir }: RunStatusIn
     });
 
     try {
+      let latestContext = restored.latestContext;
+      let selectedCheckpoint = restored.selectedCheckpoint;
+
+      if (canContinueFromResolvedRequirementCheckpoint(latestContext)) {
+        const projectProfile = await loadRequiredProjectProfile(
+          latestContext.project_id,
+          homeDir,
+        );
+        const issueSnapshot = JiraIssueSnapshotSchema.parse(
+          await readPersistedArtifact({
+            runId,
+            artifactRef: latestContext.jira_issue_snapshot_ref,
+            homeDir,
+          }),
+        );
+        const contextArtifactRef = getLatestStageArtifactRef(
+          latestContext,
+          'Context Resolution',
+        );
+        const contextArtifact =
+          contextArtifactRef === null
+            ? null
+            : ProjectContextStageResultSchema.parse(
+                await readPersistedArtifact({
+                  runId,
+                  artifactRef: contextArtifactRef,
+                  homeDir,
+                }),
+              );
+
+        if (contextArtifact?.data) {
+          if (
+            latestContext.run_mode === 'full' ||
+            latestContext.run_mode === 'brief_only'
+          ) {
+            const requirementSynthesis = synthesizeRequirementBrief({
+              projectProfile,
+              issueSnapshot,
+              projectContext: contextArtifact.data,
+            });
+            const persistedStages = await persistAnalysisStageExecutions({
+              runId,
+              context: latestContext,
+              stageExecutions: [
+                {
+                  stage: 'Requirement Synthesis',
+                  result: requirementSynthesis,
+                  contextPatch: {},
+                },
+              ],
+              homeDir,
+              approvalGateStages:
+                latestContext.run_mode === 'full'
+                  ? new Set(['Requirement Synthesis'])
+                  : undefined,
+            });
+
+            latestContext = persistedStages.context;
+
+            if (
+              latestContext.run_mode === 'brief_only' &&
+              requirementSynthesis.status === 'completed'
+            ) {
+              latestContext = applyRunModePreset(latestContext);
+              latestContext = {
+                ...latestContext,
+                run_lifecycle_status: 'completed',
+                run_outcome_status: 'success',
+                waiting_reason: null,
+              };
+              const persisted = await persistUpdatedContext({
+                runId,
+                context: latestContext,
+                triggerEvent: 'run_resumed_from_requirement_checkpoint',
+                homeDir,
+              });
+              selectedCheckpoint = persisted.checkpoint;
+            } else if (persistedStages.checkpointId) {
+              const checkpoints = await readCheckpointRecords(
+                getRunPaths(runId, homeDir).checkpointsDir,
+              );
+              selectedCheckpoint =
+                checkpoints.find(
+                  (checkpoint) =>
+                    checkpoint.checkpoint_id === persistedStages.checkpointId,
+                ) ?? selectedCheckpoint;
+            }
+          } else if (latestContext.run_mode === 'jira_writeback_only') {
+            const executionState = getExecutionExternalInputState(latestContext);
+            latestContext = {
+              ...latestContext,
+              updated_at: new Date().toISOString(),
+              current_stage:
+                executionState.stageStatus === 'completed'
+                  ? ARTIFACT_LINKING_STAGE
+                  : EXECUTION_STAGE,
+              run_lifecycle_status:
+                executionState.stageStatus === 'completed'
+                  ? 'active'
+                  : executionState.runLifecycleStatus,
+              waiting_reason:
+                executionState.stageStatus === 'completed'
+                  ? null
+                  : executionState.waitingReason,
+              stage_status_map: {
+                ...latestContext.stage_status_map,
+                Execution: executionState.stageStatus,
+                [ARTIFACT_LINKING_STAGE]: 'not_started',
+              },
+            };
+            const persisted = await persistUpdatedContext({
+              runId,
+              context: latestContext,
+              triggerEvent: 'run_resumed_from_requirement_checkpoint',
+              homeDir,
+            });
+            selectedCheckpoint = persisted.checkpoint;
+          } else if (latestContext.run_mode === 'feishu_record_only') {
+            latestContext = {
+              ...latestContext,
+              updated_at: new Date().toISOString(),
+              current_stage: KNOWLEDGE_RECORDING_STAGE,
+              run_lifecycle_status: 'active',
+              waiting_reason: null,
+              stage_status_map: {
+                ...latestContext.stage_status_map,
+                [KNOWLEDGE_RECORDING_STAGE]: 'not_started',
+              },
+            };
+            const persisted = await persistUpdatedContext({
+              runId,
+              context: latestContext,
+              triggerEvent: 'run_resumed_from_requirement_checkpoint',
+              homeDir,
+            });
+            selectedCheckpoint = persisted.checkpoint;
+          }
+        }
+      }
+
       return {
         command: 'run resume',
         exitCode: CLI_EXIT_CODES.success,
         runId,
-        checkpointId: restored.selectedCheckpoint.checkpoint_id,
-        currentStage: restored.latestContext.current_stage,
+        checkpointId: selectedCheckpoint.checkpoint_id,
+        currentStage: latestContext.current_stage,
         dryRun: false,
         nonInteractive: false,
         recovery: restored.recovery,
@@ -922,9 +1537,16 @@ export const approveCliRunStage = async ({
     });
 
     try {
+      const currentStageStatus = restored.latestContext.stage_status_map[stage];
+      const isWriteApprovalGate =
+        stage === ARTIFACT_LINKING_STAGE || stage === KNOWLEDGE_RECORDING_STAGE;
+      const canApproveCurrentStage =
+        restored.latestContext.current_stage === stage &&
+        (currentStageStatus === 'waiting_approval' ||
+          (isWriteApprovalGate && currentStageStatus === 'output_ready'));
+
       if (
-        restored.latestContext.current_stage !== stage ||
-        restored.latestContext.stage_status_map[stage] !== 'waiting_approval'
+        !canApproveCurrentStage
       ) {
         return validationError(
           'run approve',
@@ -1440,6 +2062,123 @@ export const bindCliRunBranch = async ({
   });
 };
 
+export const bindCliRunRequirement = async ({
+  runId,
+  issueKey,
+  homeDir,
+  dryRun = false,
+  nonInteractive = false,
+}: RunStageActionInput) => {
+  const requirementRef = issueKey?.trim();
+
+  if (!requirementRef) {
+    return validationError(
+      'run bind-requirement',
+      'requirement reference is required when recording a manual requirement binding.',
+      'Re-run the command with --requirement <ref>.',
+    );
+  }
+
+  return wrapCommand('run bind-requirement', async () => {
+    const { context } = await loadContext(runId, homeDir);
+
+    if (
+      context.current_stage !== 'Context Resolution' ||
+      context.run_lifecycle_status !== 'waiting_external_input'
+    ) {
+      throw StructuredErrorSchema.parse({
+        code: 'manual_requirement_binding_unavailable',
+        category: 'validation_error',
+        stage: 'Context Resolution',
+        system: 'cli',
+        operation: 'bind-requirement',
+        target_ref: context.jira_issue_snapshot_ref,
+        message:
+          'run bind-requirement is only available while Context Resolution is waiting for manual requirement input.',
+        detail:
+          'Restore a run that is stopped on requirement mapping before recording a manual binding.',
+        retryable: false,
+        outcome_unknown: false,
+        user_action:
+          'Run this command on a Context Resolution checkpoint that is waiting for manual requirement selection or binding.',
+        raw_cause_ref: null,
+        partial_state_ref: null,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    const stageArtifactRef = getLatestStageArtifactRef(context, 'Context Resolution');
+    if (!stageArtifactRef) {
+      throw new Error('Context Resolution artifact is missing for manual requirement binding.');
+    }
+
+    const latestContextResolution = ProjectContextStageResultSchema.parse(
+      await readPersistedArtifact({
+        runId,
+        artifactRef: stageArtifactRef,
+        homeDir,
+      }),
+    );
+
+    if (
+      context.waiting_reason === 'manual_requirement_selection' &&
+      !latestContextResolution.data?.requirement_candidates.some(
+        (candidate) => candidate.requirement_ref === requirementRef,
+      )
+    ) {
+      throw StructuredErrorSchema.parse({
+        code: 'manual_requirement_candidate_invalid',
+        category: 'validation_error',
+        stage: 'Context Resolution',
+        system: 'cli',
+        operation: 'bind-requirement',
+        target_ref: stageArtifactRef,
+        message:
+          'The selected requirement is not one of the persisted Context Resolution candidates.',
+        detail:
+          'Use one of the requirement candidates shown by the current Context Resolution artifact, or revise the run before forcing a new mapping.',
+        retryable: false,
+        outcome_unknown: false,
+        user_action:
+          'Choose one of the current candidates, or restart the run with a different requirement mapping policy.',
+        raw_cause_ref: null,
+        partial_state_ref: null,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    const issueSnapshot = JiraIssueSnapshotSchema.parse(
+      await readPersistedArtifact({
+        runId,
+        artifactRef: context.jira_issue_snapshot_ref,
+        homeDir,
+      }),
+    );
+    const projectProfile = await loadRequiredProjectProfile(context.project_id, homeDir);
+    const rebound = await persistRecordContextResolution({
+      runId,
+      context,
+      projectProfile,
+      issueSnapshot,
+      requirementRef,
+      skipRepoInspection: false,
+      homeDir,
+    });
+
+    return {
+      command: 'run bind-requirement',
+      exitCode: CLI_EXIT_CODES.success,
+      runId,
+      requirementRef,
+      checkpointId: rebound.checkpointId,
+      currentStage: rebound.context.current_stage,
+      waitingReason: rebound.context.waiting_reason,
+      dryRun,
+      nonInteractive,
+    };
+  });
+};
+
 export const ensureCliSubtask = async ({
   runId,
   issueKey,
@@ -1767,6 +2506,52 @@ export const previewCliWrite = async ({
       });
     }
 
+    const { context } = await loadContext(runId, homeDir);
+    const stageStatus = context.stage_status_map[stage] ?? 'not_started';
+
+    if (context.current_stage !== stage) {
+      throw StructuredErrorSchema.parse({
+        code: 'preview_stage_unavailable',
+        category: 'validation_error',
+        stage,
+        system: 'cli',
+        operation: 'preview-write',
+        target_ref: context.jira_issue_snapshot_ref,
+        message:
+          'preview-write is only available when the run is currently stopped at the requested write stage.',
+        detail:
+          `The current run is stopped at ${context.current_stage}, so ${stage} preview generation would bypass the workflow gates.`,
+        retryable: false,
+        outcome_unknown: false,
+        user_action: 'Advance the run to the requested write stage before generating a preview.',
+        raw_cause_ref: null,
+        partial_state_ref: null,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    if (stageStatus === 'waiting_external_input' || stageStatus === 'waiting_approval') {
+      throw StructuredErrorSchema.parse({
+        code: 'preview_stage_not_ready',
+        category: 'validation_error',
+        stage,
+        system: 'cli',
+        operation: 'preview-write',
+        target_ref: context.jira_issue_snapshot_ref,
+        message:
+          'preview-write requires the target write stage to be ready before a preview can be generated.',
+        detail:
+          `The current ${stage} status is ${stageStatus}, so the workflow has not reached preview generation yet.`,
+        retryable: false,
+        outcome_unknown: false,
+        user_action:
+          'Resolve the current waiting state or finish the upstream approval before generating a preview.',
+        raw_cause_ref: null,
+        partial_state_ref: null,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
     const preview = {
       preview_ref: `preview://${runId}/${encodeURIComponent(stage)}/${Date.now()}`,
       stage,
@@ -1845,6 +2630,31 @@ export const executeCliWrite = async ({
   }
 
   return wrapCommand('run execute-write', async () => {
+    const { context } = await loadContext(runId, homeDir);
+    const stageStatus = context.stage_status_map[stage] ?? 'not_started';
+
+    if (context.current_stage !== stage || stageStatus !== 'approved_pending_write') {
+      throw StructuredErrorSchema.parse({
+        code: 'execute_write_requires_approved_preview',
+        category: 'validation_error',
+        stage,
+        system: 'cli',
+        operation: 'execute-write',
+        target_ref: previewRef,
+        message:
+          'execute-write requires an approved preview on the current write stage before execution can continue.',
+        detail:
+          `The current stage is ${context.current_stage} and the ${stage} status is ${stageStatus}; both must indicate an approved write stage before execution.`,
+        retryable: false,
+        outcome_unknown: false,
+        user_action:
+          'Generate a fresh preview for the current stage, approve it, and then retry execute-write.',
+        raw_cause_ref: null,
+        partial_state_ref: null,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
     const result = {
       result_ref: `result://${runId}/${encodeURIComponent(stage)}/${Date.now()}`,
       stage,

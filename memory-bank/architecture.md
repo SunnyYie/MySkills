@@ -1,5 +1,156 @@
 # Architecture Notes
 
+## v2 任务 10 步骤 4 当前 write-stage 门禁层
+
+步骤 3 已经让 requirement 补录后的 run 能继续前进，但如果 `preview-write` 能在错误阶段被直接调用，或者 `execute-write` 不需要先 approve 就能成功，那子工作流其实仍然存在旁路。本步的重点不是改变 preview / execute 的数据结构，而是把“什么时候允许 preview、什么时候允许真正 execute”重新收口到明确的 workflow 门禁上。
+
+## 新增/调整文件职责
+
+### `src/app/cli-orchestration.ts`
+
+- 这个文件现在进一步承担 write-stage 门禁 owner 的职责：
+  - `previewCliWrite()` 会先确认 run 当前确实停在目标写阶段，避免跨阶段直跳 preview
+  - `executeCliWrite()` 会先确认该阶段已经进入 `approved_pending_write`，避免在没有审批的情况下直接执行
+  - `approveCliRunStage()` 对 `Artifact Linking` / `Knowledge Recording` 额外接受 `output_ready` 作为可批准前置状态，使 write-stage 的审批链真正闭合
+- 这三处逻辑合在一起，第一次让 writeback 子工作流拥有了完整的“ready -> preview -> approve -> execute”状态门。
+
+### `tests/integration/cli/run-record-commands.spec.ts`
+
+- 任务 10 步骤 4 为它新增了两条关键门禁回归：
+  - requirement 仍未解决时，不允许 `record jira` 直接跳到 `Artifact Linking` preview
+  - `record feishu` 在 preview 后、approval 前不允许直接 `execute-write`
+- 这些测试保护的是 write-stage 的非法路径，而不是只是验证 happy path。
+
+### `tests/integration/cli/writeback-flows.spec.ts`
+
+- 这个文件在本步没有新增测试，但被纳入了验证清单，负责证明新门禁没有破坏既有合法路径。
+- 它现在间接承担了一层很重要的角色：作为 writeback happy path 的“反证”，确保我们在收紧门禁时没有把正确的 `preview -> approve -> execute` 流程一并挡掉。
+
+## 任务 10 步骤 4 架构洞察
+
+- `preview-write` 现在要求 run 当前真的停在目标写阶段，这让 preview 不再是一个“全局可随时调用的 helper”，而是 workflow 的正式阶段动作。它和审批、恢复一样，开始真正受阶段机驱动。
+
+- `execute-write` 只接受 `approved_pending_write`，说明批准状态终于从“一个记录”变成了“执行门禁”。这让 `approve` 的工程意义从审计扩展到控制面，符合上位文档里“批准不等于隐式执行，但执行必须经过批准”的原则。
+
+- 为 write stages 放宽 `approve` 的前置状态到 `output_ready`，而不是继续沿用分析阶段的 `waiting_approval`，是一个必要的语义分化。分析阶段的“可审阅结果”与写阶段的“可执行 preview”虽然都要审批，但它们进入审批门的前置状态并不完全相同。
+
+- 本步把 preview / approval / execute 的 owner 清楚收到了 app 层，而没有散落到 renderer、connector 或 tests helper 里。这意味着后续任务 11 补真实 payload / execute 时，可以直接建立在已存在的门禁骨架上，而不必重新设计一套流程控制语义。
+
+## v2 任务 10 步骤 3 当前 checkpoint-continue 恢复层
+
+步骤 2 把 requirement 手工绑定入口补上之后，系统已经能把“我选这个 requirement”落成新的 `Context Resolution` artifact，但它仍然停在一个中间态。步骤 3 的关键不是再加一个命令，而是把“补录之后怎么继续”正式接回 workflow：继续必须发生在同一个 `run_id` 上，必须依赖最近 durable checkpoint，而不是偷偷新建 run 或临时拼一段内存态。
+
+## 新增/调整文件职责
+
+### `src/app/cli-orchestration.ts`
+
+- 这个文件现在新增了一层“resume continue”职责：
+  - 当当前 durable 状态符合 requirement 补录后的继续条件时，`run resume` 会真正推进 workflow，而不再只是返回 recovery 文案
+  - 对 `full` / `brief_only` run，它负责从最新 `Context Resolution` artifact 重建 `Requirement Synthesis` 的输入
+  - 对 `jira_writeback_only` run，它负责读取已暂存的 Execution 输入并把 run 重新推进到 `Execution` 或 `Artifact Linking`
+- 同一个文件里，`record jira` 还新增了“前置输入暂存”职责：当 requirement 仍待人工绑定时，branch / artifact / verification 不会丢失，而是先写入当前 run 的有效上下文，等待后续 continue 消费。
+
+### `tests/integration/cli/run-record-commands.spec.ts`
+
+- 任务 10 步骤 3 为它新增了真正的 continue 回归面：
+  - requirement 绑定后，主流程会在同一 run 上进入 `Requirement Synthesis`
+  - `record jira` requirement 歧义时，先保存显式输入，再在同一 run 上继续到 `Artifact Linking`
+- 这些测试保护的不是单个 helper，而是“手工绑定 -> durable checkpoint -> run resume -> 下游阶段恢复”的整条链。
+
+## 任务 10 步骤 3 架构洞察
+
+- `run resume` 从“恢复提示”升级成“可在安全条件下推进一小步的 continue 入口”，说明恢复语义开始真正消费 checkpoint，而不是只做状态说明。它仍然只在非常明确的 durable 前提下前进，避免把 resume 变成不受控的自动重放。
+
+- requirement 绑定后的继续，是通过读取最新 `Context Resolution` artifact 重新装配下游输入完成的，而不是靠 `ExecutionContext` 里零散字段拼回。这再次强化了 stage artifact 作为阶段事实源的地位。
+
+- `record jira` 先暂存 branch / artifact / verification，再等待 requirement 解决，是一个关键的用户体验收敛。它说明“等待 requirement 决策”和“保存已经拿到的外部输入”并不冲突，两者都应该属于同一个 durable run，而不是迫使用户重新输入。
+
+- 让 `full`、`brief_only`、`jira_writeback_only`、`feishu_record_only` 在 requirement 解决后的 continue 逻辑都回到 `run resume`，保持了继续动作的统一 owner。这样后续如果还要扩 checkpoint continue 规则，不需要再为不同 run mode 各造一套恢复入口。
+
+## v2 任务 10 步骤 2 当前 requirement 手工绑定入口层
+
+步骤 1 已经把 record-only 的最小输入带进来了，但只要 requirement mapping 仍停在 `manual_requirement_selection` 或 `manual_requirement_binding`，用户就还缺一条正式入口把“我选这个 requirement”落进 run。本步的核心不是继续推进下游阶段，而是把 requirement 手工绑定本身收敛成统一 workflow 事实，而不是让操作员去改 JSON 或靠外部约定修状态。
+
+## 新增/调整文件职责
+
+### `src/cli/run/register.ts`
+
+- 这个文件新增了 `run bind-requirement` 命令，把 requirement manual override / selection 暴露成正式 CLI 入口。
+- 它只负责采集 `run id + requirement ref`，不解释候选是否合法，也不直接更新 run state，继续保持 CLI 层只做参数适配的职责。
+
+### `src/app/cli-orchestration.ts`
+
+- 这个文件现在新增了 requirement 手工绑定装配职责：
+  - 校验当前 run 是否真的停在 `Context Resolution`
+  - 读取最新 `Context Resolution` artifact
+  - 在 `manual_requirement_selection` 场景下校验提交值是否属于当前候选集
+  - 重新生成一份 resolved 的 `Context Resolution` artifact，并写回当前有效 `requirement_refs`
+- 这一步没有直接推进到 `Requirement Synthesis`，说明 app 层在这里刻意把“绑定 requirement”和“继续执行下游阶段”拆成两个动作，为后续 checkpoint continue 预留清晰边界。
+
+### `tests/integration/cli/run-record-commands.spec.ts`
+
+- 任务 10 步骤 2 为它新增了 requirement 手工绑定的主流程回归面：
+  - help 中能看到 `bind-requirement`
+  - `run status` 能在 requirement 等待态暴露该 action
+  - 多候选与无 hint 两类场景都能在既有 run 上完成 binding，并产生第二份 `Context Resolution` artifact
+- 它保护的是“等待态暴露 -> CLI 入口 -> artifact 重写 -> context 更新”这一整条 requirement 补录链路。
+
+## 任务 10 步骤 2 架构洞察
+
+- requirement 手工绑定被设计成 `Context Resolution` 的一次“重写入”，而不是对 `ExecutionContext.requirement_refs` 的就地临时覆盖。这很重要，因为它把人工决策保留成新的 stage artifact，让后续 resume、审计和回退都有事实依据。
+
+- `manual_requirement_selection` 和 `manual_requirement_binding` 共用同一条 CLI 入口，是一个有意的收敛决策。两者的差异被压缩在 app 层校验规则里，而不是扩散成两套近似重复的用户命令。
+
+- `run status` 现在对 requirement 等待态暴露 `run bind-requirement`，说明 allowed action 已经不再只服务 Execution 外部输入。它开始承担更通用的“当前等待态下一步应该做什么”的职责，这对后续 resume/continue 体验很关键。
+
+- 本步故意没有把 binding 成功和下游继续执行捆死在同一命令里，说明 requirement 绑定被当作一个独立 durable checkpoint。这样步骤 3 就能在同一 run 上实现真正的“从最近 checkpoint 继续”，而不是悄悄重新跑一个新流程。
+
+## v2 任务 10 步骤 1 当前 record-only 最小输入装配层
+
+任务 9 结束后，`record jira` 和 `record feishu` 虽然已经是统一生命周期内的子工作流，但它们本质上仍然只是“快速创建一个 run”。任务 10 步骤 1 的重点不是增加新的写回能力，而是把“用户已经手里有一部分最小前置输入”这件事接到子工作流初始化阶段，让 record-only 路径不再强迫用户先建空 run、再逐条补命令。
+
+## 新增/调整文件职责
+
+### `src/cli/record/register.ts`
+
+- 这个文件原本只负责把 `record jira --project --issue` 和 `record feishu --project` 接到 app 层。
+- 任务 10 步骤 1 后，它开始承担“record-only 最小输入入口编排”的职责：
+  - `record jira` 接收 branch / artifact / verification 三类 Execution 前置输入
+  - `record feishu` 接收 issue / requirement / problem / root cause / fix / verification 等人工摘要输入
+- 这里仍然只做参数收集，不负责业务状态推进，符合 CLI 层“输入适配而不持有业务状态”的边界。
+
+### `src/app/cli-orchestration.ts`
+
+- 这个文件继续是 CLI 到 workflow 的总装配点，而任务 10 步骤 1 让它新增了一层“record-only 初始化增强”职责：
+  - `record jira` 在用户已提供最小 Execution 输入时，直接把这些输入记入当前 run，而不是要求用户再手动串 `run bind-branch` / `run provide-artifact` / `run provide-verification`
+  - `record feishu` 在用户已提供人工摘要时，负责构造手工 snapshot、verification artifact 和当前有效上下文投影
+- 一个关键边界是：它只是在现有 run 上补齐最小业务输入，并没有偷偷生成 preview、自动审批或自动执行真实写回。
+
+### `src/skills/project-context/index.ts`
+
+- 这个文件原本默认同时解析 requirement 与 repo 上下文。
+- 任务 10 步骤 1 新增了 `skipRepoInspection`，把 record-only 场景收敛成一个更明确的分支：
+  - requirement binding 仍然需要结构化解析
+  - 但 record-only 最小输入补录不再把“本地 repo 可打开”当成硬前置条件
+- 这让 `project-context` 第一次显式区分了“主流程代码分析上下文”和“独立写回子工作流上下文”的成本模型。
+
+### `tests/integration/cli/run-record-commands.spec.ts`
+
+- 这个文件在任务 10 步骤 1 中新增了两条关键回归面：
+  - `record jira` 显式带最小 Execution 输入时，run 会被推进到 `Artifact Linking` 前，而不是只停在空壳 `Execution`
+  - `record feishu` 显式带人工摘要时，run 会形成可继续预览的 `Knowledge Recording` 上下文
+- 它保护的不是某个 helper，而是“record CLI 入口 -> app 装配 -> workflow 状态推进 -> 持久化 context”的整条最小输入链路。
+
+## 任务 10 步骤 1 架构洞察
+
+- 让 `record` 在初始化时吸收最小前置输入，本质上是在补“子工作流输入边界”，不是在扩展写回能力。这样做能避免用户为了独立回写场景先创建一个几乎没有上下文价值的空 run。
+
+- `skipRepoInspection` 是本步里最重要的分层信号之一。它说明“requirement binding 解析”和“repo 可检索性”虽然都属于 `Context Resolution`，但它们并不总要绑在一起。对独立写回子工作流来说，前者仍然重要，后者则可能只是噪音依赖。
+
+- `record jira` 仍然复用了既有 `run bind-branch` / `run provide-artifact` / `run provide-verification` 的 state update 逻辑，而不是重新实现一份 record 专用分支。这保持了 Execution 输入语义的一致性，也降低了未来在幂等、checkpoint 或等待态上的分叉风险。
+
+- `record feishu` 采用“手工 snapshot + 手工 verification artifact + 最小有效上下文投影”的方式补齐独立记录场景，说明子工作流即便来源是人工补录，也依旧应该落在 artifact / context 这两类统一事实载体上，而不是塞进临时 CLI payload。
+
 ## v2 任务 9 当前代码定位与修复计划主流程接线层
 
 任务 7 已经把前五个分析阶段串进了主流程，但直到任务 9 之前，这条链路仍缺少对“下游产物到底是否已经成为正式 workflow 契约”的明确证明。任务 9 的重点不是再造一条新流程，而是把 `Context Resolution`、`Code Localization`、`Fix Planning` 已有的接线方式冻结成可回归事实：阶段结果必须落为 artifact、checkpoint 必须能引用当前有效审批、等待态也必须被视为正式阶段产物，而不是实现细节。

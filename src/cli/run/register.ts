@@ -3,6 +3,7 @@ import { Command } from 'commander';
 import {
   approveCliRunStage,
   bindCliRunBranch,
+  bindCliRunRequirement,
   createCliRun,
   ensureCliSubtask,
   executeCliWrite,
@@ -280,6 +281,38 @@ export const registerRunCommands = (
             runId: options.run,
             branchName: options.branch,
             issueKey: options.issue,
+            homeDir: runtime.homeDir,
+            dryRun: Boolean(options.dryRun),
+            nonInteractive: Boolean(options.nonInteractive),
+          });
+
+          await emitCliPayload({
+            runtime,
+            payload,
+            asJson: Boolean(options.json),
+            outputPath: options.output,
+          });
+        },
+      ),
+  );
+
+  addSharedOptions(
+    run
+      .command('bind-requirement')
+      .requiredOption('--run <id>', 'run id')
+      .requiredOption('--requirement <ref>', 'resolved requirement reference')
+      .action(
+        async (options: {
+          run: string;
+          requirement: string;
+          json?: boolean;
+          dryRun?: boolean;
+          nonInteractive?: boolean;
+          output?: string;
+        }) => {
+          const payload = await bindCliRunRequirement({
+            runId: options.run,
+            issueKey: options.requirement,
             homeDir: runtime.homeDir,
             dryRun: Boolean(options.dryRun),
             nonInteractive: Boolean(options.nonInteractive),

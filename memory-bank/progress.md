@@ -1,5 +1,172 @@
 # Progress
 
+## 2026-03-20 - v2 任务 6 步骤 4：统一 Jira 读取失败的结构化错误语义
+
+### 本轮完成内容
+
+- 在 `src/infrastructure/connectors/jira/index.ts` 中把 `readJiraIssueSnapshot()` 扩展为真正的错误收口点。
+- 新增并统一以下读取错误语义：
+  - `createJiraPermissionDeniedError()`：权限不足 / credential scope 不可读
+  - `createJiraIssueNotFoundError()`：issue key 不存在或不可见
+  - `createInvalidJiraIssueError()`：原始 payload 字段缺失或为空
+  - `createJiraNetworkError()`：transport 网络失败
+- 在 connector 内新增最小原始字段检查逻辑，确保 `issue_key`、`issue_id`、`issue_type_id`、`project_key`、`summary`、`description`、`status_name` 等关键字段缺失时，不会把异常泄漏成原生 `TypeError`。
+- `readJiraIssueSnapshot()` 现在会先识别 transport/status/code，再抛出统一的 `StructuredError`；app 层无需再理解 fixture 文件错误或未来 transport 细节。
+- 在 `tests/unit/intake/jira-intake.spec.ts` 中补齐步骤 4 的 red/green 覆盖：
+  - 权限不足
+  - issue 不存在
+  - payload 字段缺失
+  - 网络错误
+
+### 依据
+
+- 用户指令：任务 6 每完成一个步骤必须先测试、验证，再更新 `progress.md` 与 `architecture.md`。
+- `memory-bank/features/v2/实施计划.md` 任务 6 步骤 4：
+  - 统一权限不足、字段缺失、找不到 issue、网络错误的错误语义。
+- `memory-bank/features/v1/需求文档.md`：
+  - 如果权限不足、字段缺失或接口失败，系统必须返回结构化错误，并提示用户如何补录或重试。
+
+### 验证记录
+
+1. 验证对象：Jira 读取错误语义 red 阶段
+   触发方式：先修改 `tests/unit/intake/jira-intake.spec.ts`，再运行 `npm run test:unit -- tests/unit/intake/jira-intake.spec.ts`
+   预期结果：实现前准确暴露 connector 把权限错误直接透传成原生异常
+   实际结果：通过；red 阶段失败点为收到原生 `Error: Forbidden`，未被映射成 `StructuredError`
+
+2. 验证对象：Jira 读取错误统一收敛与受影响回归
+   触发方式：实现 connector 错误映射后运行 `npm run test:unit -- tests/unit/intake/jira-intake.spec.ts && npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts tests/integration/cli/writeback-flows.spec.ts && npm run typecheck`
+   预期结果：四类错误都映射为稳定 `StructuredError`，且真实 snapshot 读取链路不被破坏
+   实际结果：通过；unit 全量 `80/80` 通过，integration 全量 `14/14` 通过，`typecheck` 退出码为 0
+
+### 当前边界说明
+
+- 任务 6 到此完成的是“真实 Jira 读取 + snapshot artifact + skill 边界 + 错误语义”的最小闭环，还没有进入任务 7 的主流程自动编排。
+- 当前 transport 仍基于 orchestrator home 下的 Jira issue fixture 文件；这是当前仓库阶段下的真实 connector 读取实现，不假装已经具备 credential-backed HTTP adapter。
+- `run start` 目前已经拥有真实 Intake 上游事实源，但仍未自动执行 `Intake`、`Context Resolution` 等主流程阶段；这些必须留给任务 7。
+
+## 2026-03-20 - v2 任务 6 步骤 3：让 `jira-intake` 只消费结构化 snapshot artifact
+
+### 本轮完成内容
+
+- 在 `src/skills/jira-intake/index.ts` 中新增：
+  - `loadJiraIssueSnapshotArtifact()`
+  - `runJiraIntakeFromArtifact()`
+- 新 helper 显式把 `jira-intake` 的输入边界固定为 `JiraIssueSnapshotSchema`：
+  - 先解析 persisted snapshot artifact
+  - 再调用既有 `runJiraIntake()` 生成阶段结果
+- `runJiraIntake()` 本身继续只处理已经标准化的 `issueSnapshot`，没有新增任何 Jira 原始读取或 I/O 职责。
+- 在 `tests/unit/intake/jira-intake.spec.ts` 中补齐步骤 3 的 red/green 覆盖：
+  - 锁定 skill 可以从结构化 snapshot artifact 进入
+  - 锁定 raw Jira payload 不能被当作 Intake artifact 直接消费
+
+### 依据
+
+- 用户指令：任务 6 每一步都必须先测、验证通过后记录进度和架构洞察，再进入下一步。
+- `memory-bank/features/v2/实施计划.md` 任务 6 步骤 3：
+  - 让 `jira-intake` 只消费结构化快照，而不是自己访问原始接口。
+- `memory-bank/features/v1/技术方案.md`：
+  - `Skill Layer` 只接受结构化输入并返回结构化输出，不直接做 I/O。
+
+### 验证记录
+
+1. 验证对象：`jira-intake` artifact 边界 red 阶段
+   触发方式：先修改 `tests/unit/intake/jira-intake.spec.ts`，再运行 `npm run test:unit -- tests/unit/intake/jira-intake.spec.ts`
+   预期结果：实现前准确暴露 skill 缺少 snapshot artifact 入口
+   实际结果：通过；red 阶段失败点为 `loadJiraIssueSnapshotArtifact is not a function`
+
+2. 验证对象：`jira-intake` 只消费结构化快照
+   触发方式：实现 skill helper 后运行 `npm run test:unit -- tests/unit/intake/jira-intake.spec.ts && npm run typecheck`
+   预期结果：结构化 snapshot artifact 能进入 Intake；raw Jira payload 会在 schema 边界被拒绝
+   实际结果：通过；unit 全量 `79/79` 通过，`typecheck` 退出码为 0
+
+### 当前边界说明
+
+- 本步骤只显式化了 skill 的 artifact 输入边界，还没有把权限不足、字段缺失、issue 不存在、网络错误统一映射为稳定的结构化错误。
+- app 层目前已经能落 snapshot artifact，但后续真正进入主流程时，还需要由任务 7 把 `Intake` 阶段执行串起来；本轮不越界进入任务 7。
+- 当前 `runJiraIntakeFromArtifact()` 仍然是纯函数入口，不负责根据 ref 读文件；文件读取与持久化边界继续留在 app / storage 层。
+
+## 2026-03-20 - v2 任务 6 步骤 2：把 Jira 读取结果落为 snapshot artifact
+
+### 本轮完成内容
+
+- 在 `src/app/cli-orchestration.ts` 中把 `createCliRun()` 接到真实 Jira snapshot 读取与持久化链路。
+- 新增 `persistJiraIssueSnapshotArtifact()`，把读取后的结构化快照写入当前 run 的 `artifacts/` 目录，并固定引用格式为 `artifact://jira/issues/<issue_key>`。
+- `createCliRun()` 现在在 `run start`、`run brief`、`record jira` 三类带 issue 的入口中会：
+  - 先读取 Jira 快照
+  - 再落盘 artifact
+  - 再把 `ExecutionContext.active_bug_issue_key` 和 `jira_issue_snapshot_ref` 更新为真实快照来源
+- 同步把 `stage_artifact_refs.Intake` 接到 snapshot artifact，确保后续恢复和审计能从 context 直接追到 Intake 事实源。
+- 在 `tests/integration/cli/run-record-commands.spec.ts` 中新增步骤 2 的集成断言：
+  - `run start` 后必须出现 `jira-issue-snapshot-<issue>.json`
+  - context 中的 snapshot ref 必须指向 `artifact://jira/issues/<issue>`
+- 在相关 integration fixture 中补充 Jira issue 种子，确保 `run brief`、`record jira` 等真实经过读取链路，而不是继续依赖旧的占位 ref。
+
+### 依据
+
+- 用户指令：任务 6 每完成一个步骤后先验证，通过后立即更新 `progress.md` 与 `architecture.md`。
+- `memory-bank/features/v2/实施计划.md` 任务 6 步骤 2：
+  - 把读取结果落为 Jira snapshot artifact。
+- `memory-bank/features/v1/需求文档.md` 与 `memory-bank/features/v1/技术方案.md`：
+  - Jira snapshot 应成为后续 Intake 与写回链路的统一事实源。
+  - `ExecutionContext` 只保存 ref，不直接内嵌完整外部 payload。
+
+### 验证记录
+
+1. 验证对象：Jira snapshot artifact red 阶段
+   触发方式：先修改 `tests/integration/cli/run-record-commands.spec.ts`，再运行 `npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts`
+   预期结果：实现前准确暴露 `run start` 没有落 Jira snapshot artifact
+   实际结果：通过；red 阶段失败点为找不到 `artifacts/jira-issue-snapshot-BUG-120.json`
+
+2. 验证对象：snapshot artifact 持久化与 context 接线
+   触发方式：实现 app 层接线后运行 `npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts tests/integration/cli/writeback-flows.spec.ts && npm run typecheck`
+   预期结果：`run start`/`run brief`/`record jira` 都走真实 snapshot 读取路径，且 context 指向真实 artifact ref
+   实际结果：通过；integration 全量 `14/14` 通过，`typecheck` 退出码为 0
+
+### 当前边界说明
+
+- 本步骤只完成了“读取后持久化 snapshot artifact”，还没有让 `jira-intake` 明确只从结构化快照 artifact 消费输入。
+- 当前读取 transport 仍是基于 orchestrator home 下的 Jira issue fixture 文件；真正的错误语义标准化与 transport 异常归类仍留在任务 6 后续步骤。
+- `run-lifecycle.initializeRun()` 仍然只接收 snapshot ref，不负责读取或落盘；这条边界在本步骤保持不变。
+
+## 2026-03-20 - v2 任务 6 步骤 1：打通 Jira bug 读取入口并冻结最小读取字段
+
+### 本轮完成内容
+
+- 在 `src/infrastructure/connectors/jira/index.ts` 中新增 `readJiraIssueSnapshot()`，为任务 6 提供真正的 Jira 读取入口。
+- 新读取入口当前收敛两件事：
+  - 只接收 `projectProfile`、`issueKey` 和底层 `fetchIssue()` 依赖
+  - 读取成功后统一复用 `buildJiraIssueSnapshot()` 输出结构化 `JiraIssueSnapshot`
+- 在 `tests/unit/intake/jira-intake.spec.ts` 中新增步骤 1 的 red/green 覆盖：
+  - 锁定 connector 必须按传入 `issue_key` 发起读取
+  - 锁定 Intake 所需的最小字段都来自结构化快照，而不是调用方临时拼装
+
+### 依据
+
+- 用户指令：继续执行 `memory-bank/features/v2/实施计划.md` 的任务 6；每完成一个步骤先测试，测试通过后更新 `progress.md` 与 `architecture.md`，在此之前不要进入任务 7。
+- `memory-bank/features/v2/实施计划.md` 任务 6 步骤 1：
+  - 打通 Jira bug 读取入口，获取 issue key、状态、描述、标签、关联线索和写回目标所需字段。
+- `memory-bank/features/v1/技术方案.md`：
+  - `Infrastructure Layer` 是唯一外部系统访问入口。
+  - `jira-intake` 应消费结构化快照，而不是自己直连原始 Jira 接口。
+
+### 验证记录
+
+1. 验证对象：Jira 读取入口 red 阶段
+   触发方式：先修改 `tests/unit/intake/jira-intake.spec.ts`，再运行 `npm run test:unit -- tests/unit/intake/jira-intake.spec.ts`
+   预期结果：实现前准确暴露 connector 读取入口缺失
+   实际结果：通过；red 阶段失败点为 `readJiraIssueSnapshot is not a function`
+
+2. 验证对象：Jira 读取入口 green 阶段与类型一致性
+   触发方式：实现 `readJiraIssueSnapshot()` 后运行 `npm run test:unit -- tests/unit/intake/jira-intake.spec.ts && npm run typecheck`
+   预期结果：connector 能按 `issue_key` 读取并输出结构化快照，且仓库范围类型保持一致
+   实际结果：通过；unit 全量 `78/78` 通过，`typecheck` 退出码为 0
+
+### 当前边界说明
+
+- 本步骤只补齐了“读取入口 + 结构化快照”的 connector 层能力，还没有把读取结果落盘成 Jira snapshot artifact。
+- `run start` / `run brief` 目前仍未在初始化时真实读取 Jira，也还没有更新 `jira_issue_snapshot_ref` 的实际 artifact 指向；这属于任务 6 后续步骤。
+- 错误语义目前仍只覆盖已有的权限不足 / 字段非法 helper，`issue not found` 与网络错误的统一收敛仍留在任务 6 后续步骤。
+
 ## 2026-03-20 - v2 任务 5：补齐项目画像与主流程接线
 
 ### 本轮完成内容

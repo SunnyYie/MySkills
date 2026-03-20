@@ -4,8 +4,13 @@ import { type ProjectProfile } from '../../../src/domain/index.js';
 import {
   buildJiraIssueSnapshot,
   createJiraPermissionDeniedError,
+  readJiraIssueSnapshot,
 } from '../../../src/infrastructure/connectors/jira/index.js';
-import { runJiraIntake } from '../../../src/skills/jira-intake/index.js';
+import {
+  loadJiraIssueSnapshotArtifact,
+  runJiraIntake,
+  runJiraIntakeFromArtifact,
+} from '../../../src/skills/jira-intake/index.js';
 
 const createProjectProfile = (): ProjectProfile => ({
   project_id: 'proj-a',
@@ -83,6 +88,137 @@ const createProjectProfile = (): ProjectProfile => ({
 });
 
 describe('jira intake', () => {
+  it('reads a Jira issue by issue key and normalizes the snapshot fields Intake needs', async () => {
+    const requestedIssueKeys: string[] = [];
+    const snapshot = await readJiraIssueSnapshot({
+      projectProfile: createProjectProfile(),
+      issueKey: 'BUG-123',
+      fetchIssue: async (issueKey) => {
+        requestedIssueKeys.push(issueKey);
+        return {
+          issue_key: issueKey,
+          issue_id: '10001',
+          issue_type_id: '10001',
+          project_key: 'BUG',
+          summary: 'Payments module rejects coupon combinations',
+          description:
+            'The checkout flow fails when loyalty and campaign coupons are combined.',
+          status_name: 'In Progress',
+          labels: ['bug', 'module:payments', 'req:req-200'],
+          requirement_sources: {
+            issue_link: ['REQ-100'],
+            label: ['REQ-200'],
+          },
+          source_url: 'https://jira.example.com/browse/BUG-123',
+        };
+      },
+    });
+
+    expect(requestedIssueKeys).toEqual(['BUG-123']);
+    expect(snapshot).toMatchObject({
+      issue_key: 'BUG-123',
+      issue_id: '10001',
+      status_name: 'In Progress',
+      description:
+        'The checkout flow fails when loyalty and campaign coupons are combined.',
+      labels: ['bug', 'module:payments', 'req:req-200'],
+      requirement_hints: [
+        {
+          source_type: 'issue_link',
+          values: ['REQ-100'],
+        },
+        {
+          source_type: 'label',
+          values: ['REQ-200'],
+        },
+      ],
+      writeback_targets: [
+        {
+          target_type: 'comment',
+          target_field_id_or_comment_mode: 'comment',
+        },
+        {
+          target_type: 'field',
+          target_field_id_or_comment_mode: 'customfield_12345',
+        },
+      ],
+    });
+  });
+
+  it('normalizes permission, missing issue, invalid payload, and network failures into stable Intake errors', async () => {
+    const profile = createProjectProfile();
+
+    await expect(
+      readJiraIssueSnapshot({
+        projectProfile: profile,
+        issueKey: 'BUG-403',
+        fetchIssue: async () => {
+          const error = new Error('Forbidden');
+          Object.assign(error, { status: 403 });
+          throw error;
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: 'jira_permission_denied',
+      category: 'permission_denied',
+      target_ref: 'jira:BUG-403',
+    });
+
+    await expect(
+      readJiraIssueSnapshot({
+        projectProfile: profile,
+        issueKey: 'BUG-404',
+        fetchIssue: async () => {
+          const error = new Error('Not found');
+          Object.assign(error, { status: 404 });
+          throw error;
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: 'jira_issue_not_found',
+      category: 'validation_error',
+      target_ref: 'jira:BUG-404',
+    });
+
+    await expect(
+      readJiraIssueSnapshot({
+        projectProfile: profile,
+        issueKey: 'BUG-422',
+        fetchIssue: async (issueKey) => ({
+          issue_key: issueKey,
+          issue_id: '10022',
+          issue_type_id: '10001',
+          project_key: 'BUG',
+          summary: 'Missing description field',
+          description: '',
+          status_name: 'Open',
+          labels: ['bug'],
+        }),
+      }),
+    ).rejects.toMatchObject({
+      code: 'jira_issue_invalid',
+      category: 'validation_error',
+      target_ref: 'jira:BUG-422',
+    });
+
+    await expect(
+      readJiraIssueSnapshot({
+        projectProfile: profile,
+        issueKey: 'BUG-502',
+        fetchIssue: async () => {
+          const error = new Error('socket hang up');
+          Object.assign(error, { code: 'ECONNRESET' });
+          throw error;
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: 'jira_network_error',
+      category: 'network_error',
+      target_ref: 'jira:BUG-502',
+      retryable: true,
+    });
+  });
+
   it('builds a structured Jira snapshot so skills only consume normalized issue data', () => {
     const profile = createProjectProfile();
 
@@ -181,6 +317,58 @@ describe('jira intake', () => {
       source_refs: ['jira:BUG-123', 'jira-snapshot:BUG-123'],
       generated_at: '2026-03-19T03:00:00.000Z',
     });
+  });
+
+  it('loads Intake input from a structured snapshot artifact instead of raw Jira payloads', () => {
+    const structuredSnapshot = buildJiraIssueSnapshot({
+      projectProfile: createProjectProfile(),
+      rawIssue: {
+        issue_key: 'BUG-124',
+        issue_id: '10002',
+        issue_type_id: '10001',
+        project_key: 'BUG',
+        summary: 'Checkout blocks coupon combinations',
+        description: 'The checkout flow rejects loyalty plus campaign coupons.',
+        status_name: 'To Do',
+        labels: ['bug', 'module:checkout'],
+        requirement_sources: {
+          issue_link: ['REQ-201'],
+        },
+        source_url: 'https://jira.example.com/browse/BUG-124',
+      },
+    });
+
+    const loadedSnapshot = loadJiraIssueSnapshotArtifact({
+      snapshotArtifact: structuredSnapshot,
+    });
+    const result = runJiraIntakeFromArtifact({
+      snapshotArtifact: structuredSnapshot,
+      generatedAt: '2026-03-19T03:05:00.000Z',
+    });
+
+    expect(loadedSnapshot.issue_key).toBe('BUG-124');
+    expect(result).toMatchObject({
+      data: {
+        issue_key: 'BUG-124',
+        requirement_hint_count: 1,
+      },
+      source_refs: ['jira:BUG-124', 'jira-snapshot:BUG-124'],
+    });
+
+    expect(() =>
+      loadJiraIssueSnapshotArtifact({
+        snapshotArtifact: {
+          issue_key: 'BUG-124',
+          issue_id: '10002',
+          issue_type_id: '10001',
+          project_key: 'BUG',
+          summary: 'raw payload',
+          description: 'raw payload',
+          status_name: 'To Do',
+          labels: ['bug'],
+        },
+      }),
+    ).toThrow();
   });
 
   it('maps permission failures to a stable Intake structured error instead of a generic exception', () => {

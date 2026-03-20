@@ -7,6 +7,12 @@ import {
 
 const defaultGeneratedAt = () => new Date().toISOString();
 
+export const loadJiraIssueSnapshotArtifact = ({
+  snapshotArtifact,
+}: {
+  snapshotArtifact: unknown;
+}): JiraIssueSnapshot => JiraIssueSnapshotSchema.parse(snapshotArtifact);
+
 export const runJiraIntake = ({
   issueSnapshot,
   generatedAt = defaultGeneratedAt(),
@@ -33,3 +39,15 @@ export const runJiraIntake = ({
     generated_at: generatedAt,
   });
 };
+
+export const runJiraIntakeFromArtifact = ({
+  snapshotArtifact,
+  generatedAt = defaultGeneratedAt(),
+}: {
+  snapshotArtifact: unknown;
+  generatedAt?: string;
+}): JiraIntakeStageResult =>
+  runJiraIntake({
+    issueSnapshot: loadJiraIssueSnapshotArtifact({ snapshotArtifact }),
+    generatedAt,
+  });

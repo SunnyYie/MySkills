@@ -118,10 +118,39 @@ const seedCompleteProjectProfile = async (homeDir: string) => {
   );
 };
 
+const seedJiraIssueFixture = async (homeDir: string, issueKey: string) => {
+  const fixturePath = path.join(
+    homeDir,
+    '.local',
+    'share',
+    'bugfix-orchestrator',
+    'fixtures',
+    'jira',
+    'issues',
+    `${issueKey}.json`,
+  );
+
+  await writeJsonAtomically(fixturePath, {
+    issue_key: issueKey,
+    issue_id: `id-${issueKey}`,
+    issue_type_id: '10001',
+    project_key: 'BUG',
+    summary: `Summary for ${issueKey}`,
+    description: `Description for ${issueKey}`,
+    status_name: 'In Progress',
+    labels: ['bug', 'module:api'],
+    requirement_sources: {
+      issue_link: ['REQ-100'],
+    },
+    source_url: `https://jira.example.com/browse/${issueKey}`,
+  });
+};
+
 describe('CLI writeback flows', () => {
   it('lets the jira writeback subworkflow complete dry-run preview and non-interactive execution through shared run semantics', async () => {
     const fakeHome = await mkdtemp(path.join(tmpdir(), 'bfo-cli-writeback-jira-'));
     await seedCompleteProjectProfile(fakeHome);
+    await seedJiraIssueFixture(fakeHome, 'BUG-900');
     const fixtureDir = await mkdtemp(path.join(tmpdir(), 'bfo-cli-writeback-fixtures-'));
     const collector = createOutputCollector();
     const program = bootstrapCli({

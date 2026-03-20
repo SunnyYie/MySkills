@@ -23,6 +23,7 @@ import {
   ProjectProfileValidationError,
   loadProjectProfile,
 } from '../skills/config-loader/index.js';
+import { readJiraIssueSnapshot } from '../infrastructure/connectors/index.js';
 import {
   DRY_RUN_PERSISTENCE_POLICY,
   getCheckpointFilePath,
@@ -126,9 +127,26 @@ const serializeHash = (value: unknown) =>
   `sha256:${createHash('sha256').update(JSON.stringify(value)).digest('hex')}`;
 
 const extractIssueKeyFromSnapshotRef = (snapshotRef: string) => {
-  const matched = /^artifact:\/\/jira\/(.+)$/.exec(snapshotRef);
-  return matched?.[1] ?? null;
+  const canonicalMatched = /^artifact:\/\/jira\/issues\/([^/]+)$/.exec(snapshotRef);
+  if (canonicalMatched) {
+    return canonicalMatched[1];
+  }
+
+  const legacyMatched = /^artifact:\/\/jira\/([^/]+)$/.exec(snapshotRef);
+  return legacyMatched?.[1] ?? null;
 };
+
+const getJiraIssueFixturePath = (issueKey: string, homeDir?: string) =>
+  path.join(
+    homeDir ?? process.env.BUGFIX_ORCHESTRATOR_HOME ?? '',
+    '.local',
+    'share',
+    'bugfix-orchestrator',
+    'fixtures',
+    'jira',
+    'issues',
+    `${issueKey}.json`,
+  );
 
 const loadContext = async (runId: string, homeDir?: string) => {
   const runPaths = getRunPaths(runId, homeDir);
@@ -387,10 +405,11 @@ export const createCliRun = async ({
 }: StartRunInput) =>
   wrapCommand(runMode === 'brief_only' ? 'run brief' : 'run start', async () => {
     const projectProfile = await loadRequiredProjectProfile(projectId, homeDir);
+    const initialSnapshotRef = `artifact://jira/issues/${issueKey}`;
     const initialized = await initializeRun({
       projectId,
       configVersion: projectProfile.config_version,
-      jiraIssueSnapshotRef: `artifact://jira/${issueKey}`,
+      jiraIssueSnapshotRef: initialSnapshotRef,
       initiator,
       homeDir,
       runIdFactory: undefined,
@@ -398,10 +417,42 @@ export const createCliRun = async ({
     });
 
     try {
-      const nextContext = applyRunModePreset({
+      let nextContext: ExecutionContext = {
         ...initialized.context,
         run_mode: runMode,
-      });
+      };
+
+      if (runMode !== 'feishu_record_only') {
+        const snapshot = await readJiraIssueSnapshot({
+          projectProfile,
+          issueKey,
+          fetchIssue: async (requestedIssueKey) =>
+            JSON.parse(
+              await readFile(
+                getJiraIssueFixturePath(requestedIssueKey, homeDir),
+                'utf8',
+              ),
+            ),
+        });
+        const persistedSnapshot = await persistJiraIssueSnapshotArtifact({
+          runId: initialized.runId,
+          issueKey: snapshot.issue_key,
+          snapshot,
+          homeDir,
+        });
+
+        nextContext = {
+          ...nextContext,
+          active_bug_issue_key: snapshot.issue_key,
+          jira_issue_snapshot_ref: persistedSnapshot.artifactRef,
+          stage_artifact_refs: {
+            ...nextContext.stage_artifact_refs,
+            Intake: [persistedSnapshot.artifactRef],
+          },
+        };
+      }
+
+      nextContext = applyRunModePreset(nextContext);
       const persisted = await persistUpdatedContext({
         runId: initialized.runId,
         context: nextContext,
@@ -803,6 +854,32 @@ const persistSubtaskPreviewArtifact = async ({
   };
 
   await writeJsonAtomically(targetPath, payload);
+
+  return {
+    artifactRef,
+    targetPath,
+  };
+};
+
+const persistJiraIssueSnapshotArtifact = async ({
+  runId,
+  issueKey,
+  snapshot,
+  homeDir,
+}: {
+  runId: string;
+  issueKey: string;
+  snapshot: unknown;
+  homeDir?: string;
+}) => {
+  const runPaths = getRunPaths(runId, homeDir);
+  const targetPath = path.join(
+    runPaths.artifactsDir,
+    `jira-issue-snapshot-${issueKey}.json`,
+  );
+  const artifactRef = `artifact://jira/issues/${issueKey}`;
+
+  await writeJsonAtomically(targetPath, snapshot);
 
   return {
     artifactRef,

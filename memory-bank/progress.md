@@ -1,5 +1,56 @@
 # Progress
 
+## 2026-03-20 - v2 任务 5：补齐项目画像与主流程接线
+
+### 本轮完成内容
+
+- 在 `src/app/cli-orchestration.ts` 中新增 `loadRequiredProjectProfile()`，让 `run start`、`run brief`、`record jira`、`record feishu` 在进入 `initializeRun()` 前统一通过 `config-loader` 加载并校验项目画像。
+- 新增 `mapProjectProfileValidationError()`，把 `ProjectProfileValidationError` 统一映射为结构化 CLI 错误：
+  - 存在缺失字段时，返回 `configuration_missing`
+  - 版本不兼容、非法引用、非法值时，返回 `validation_error`
+- `createCliRun()` 不再写死 `configVersion: '2026-03-19'`，而是使用真实项目画像中的 `config_version` 写入 run context，确保后续 workflow 只能建立在已加载的可信配置之上。
+- 在 `tests/integration/cli/run-record-commands.spec.ts` 中补齐任务 5 的主回归覆盖：
+  - 缺失项目画像时，`run start` 直接失败且不会创建 run 目录
+  - 缺失项目画像时，`record feishu` 同样被入口闸门拦下
+  - 配置版本非法时，`record jira` 返回结构化 `validation_error`
+  - 配置修复后，`run brief` 可重新成功创建 run，且 context 内 `config_version` 来自真实项目画像
+- 在 `tests/integration/cli/run-record-commands.spec.ts` 与 `tests/integration/cli/writeback-flows.spec.ts` 中为既有 `run/record` 流程显式补齐项目画像种子，确认任务 5 的入口接线不会破坏任务 3/4 已完成的 CLI 行为。
+
+### 依据
+
+- 用户指令：继续执行 `memory-bank/features/v2/实施计划.md` 的任务 5；每完成一个步骤后先测试，通过后更新 `progress.md` 与 `architecture.md`，在此之前不要进行任务 6。
+- `memory-bank/features/v2/实施计划.md` 任务 5：
+  - 在进入 `run start`、`run brief`、`record jira`、`record feishu` 前统一加载项目画像
+  - 将配置缺失、非法引用、版本不兼容等错误映射为结构化 CLI 错误
+  - 阻止未绑定项目的命令继续创建 run
+  - 保持既有 `bind` / `inspect` 边界不变
+- `memory-bank/features/v1/技术方案.md`：
+  - `src/app` 负责 CLI 到 workflow 的装配
+  - `Workflow/Agent Layer` 之前的配置装配应在 app 层收敛，不能让 workflow 持有配置读取职责
+
+### 验证记录
+
+1. 验证对象：任务 5 的入口闸门 red 阶段
+   触发方式：先修改 `tests/integration/cli/run-record-commands.spec.ts`，再运行 `npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts`
+   预期结果：实现前准确暴露 `run start` 在没有项目画像时仍错误创建 run
+   实际结果：通过；red 阶段断言失败，实际输出为 `run start / exitCode 0`，确认缺口存在
+
+2. 验证对象：项目画像加载接线与结构化错误映射
+   触发方式：实现 `src/app/cli-orchestration.ts` 后运行 `npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts tests/integration/cli/writeback-flows.spec.ts`
+   预期结果：`run` / `record` 在缺配置时提前失败，在有完整配置时继续保持既有主流程与子工作流行为
+   实际结果：通过；受影响 integration 全量通过，`3/3` 文件、`13/13` 用例通过
+
+3. 验证对象：空壳 run 阻断回归与真实 `config_version` 透传
+   触发方式：补充 `record feishu` 与 `config_version` 断言后，重新运行 `npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts`
+   预期结果：四条入口都受同一项目画像闸门约束，修复后的 run context 使用存储配置版本
+   实际结果：通过；integration 全量 `13/13` 通过
+
+### 当前边界说明
+
+- 任务 5 只完成了“进入 workflow 之前的项目画像接线”，还没有把项目画像进一步注入 `Intake`、`Context Resolution` 或真实 Jira 读取阶段；这些仍属于任务 6 及之后的范围。
+- 当前 `bind` / `inspect` 的实现与职责未改动，项目画像的写入、检查、缺失项提示仍然由既有配置链路负责。
+- 当前仓库没有额外 git worktree；`git worktree list` 只显示 `/Users/sunyi/ai/MySkills [main]`，因此本轮不存在额外 worktree 可删除。
+
 ## 2026-03-20 - v2 任务 4 步骤 4：统一 dry-run / execute payload 基线并冻结 reconcile-first 恢复决策
 
 ### 本轮完成内容

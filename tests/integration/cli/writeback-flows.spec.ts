@@ -5,7 +5,12 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { bootstrapCli } from '../../../src/app/index.js';
-import { DRY_RUN_PERSISTENCE_POLICY, getRunPaths } from '../../../src/storage/index.js';
+import {
+  DRY_RUN_PERSISTENCE_POLICY,
+  getProjectProfilePath,
+  getRunPaths,
+  writeJsonAtomically,
+} from '../../../src/storage/index.js';
 
 const createOutputCollector = () => {
   let stdout = '';
@@ -39,9 +44,84 @@ const writeJsonFixture = async (
   return fixturePath;
 };
 
+const createCompleteProjectProfile = () => ({
+  project_id: 'proj-a',
+  project_name: 'Project A',
+  config_version: '2026-03-19',
+  jira: {
+    base_url: 'https://jira.example.com',
+    project_key: 'BUG',
+    issue_type_ids: ['10001'],
+    requirement_link_rules: [
+      {
+        source_type: 'issue_link',
+        priority: 1,
+        fallback_action: 'manual',
+      },
+    ],
+    writeback_targets: ['comment'],
+    subtask: {
+      issue_type_id: '10002',
+      summary_template: '[{issue_key}] {summary}',
+    },
+    branch_binding: {
+      target_issue_source: 'subtask',
+      fallback_to_bug: true,
+    },
+    commit_binding: {
+      target_issue_source: 'subtask',
+    },
+    credential_ref: 'cred:jira/project-a',
+  },
+  requirements: {
+    source_type: 'feishu_doc',
+    source_ref: 'doc://feishu/project-a',
+  },
+  gitlab: {
+    base_url: 'https://gitlab.example.com',
+    project_id: 'group/project-a',
+    default_branch: 'main',
+    branch_naming_rule: 'bugfix/{issue_key}',
+    branch_binding: {
+      input_mode: 'current_branch',
+    },
+    credential_ref: 'cred:gitlab/project-a',
+  },
+  feishu: {
+    space_id: 'space-1',
+    doc_id: 'doc-1',
+    block_path_or_anchor: 'root/bugs',
+    template_id: 'tpl-1',
+    template_version: 'v1',
+    credential_ref: 'cred:feishu/project-a',
+  },
+  repo: {
+    local_path: '/workspace/project-a',
+    module_rules: [{ module_id: 'api', path_pattern: 'src/api/**' }],
+  },
+  approval_policy: {
+    requirement_binding_required: true,
+  },
+  serialization_policy: {
+    persist_dry_run_previews: true,
+  },
+  sensitivity_policy: {
+    sensitive_field_paths: ['jira.credential_ref'],
+    prohibited_plaintext_fields: ['token'],
+  },
+});
+
+const seedCompleteProjectProfile = async (homeDir: string) => {
+  await writeJsonAtomically(
+    getProjectProfilePath('proj-a', homeDir),
+    createCompleteProjectProfile(),
+  );
+};
+
 describe('CLI writeback flows', () => {
   it('lets the jira writeback subworkflow complete dry-run preview and non-interactive execution through shared run semantics', async () => {
     const fakeHome = await mkdtemp(path.join(tmpdir(), 'bfo-cli-writeback-jira-'));
+    await seedCompleteProjectProfile(fakeHome);
     const fixtureDir = await mkdtemp(path.join(tmpdir(), 'bfo-cli-writeback-fixtures-'));
     const collector = createOutputCollector();
     const program = bootstrapCli({
@@ -221,6 +301,7 @@ describe('CLI writeback flows', () => {
 
   it('lets the feishu recording subworkflow complete independently from the main flow', async () => {
     const fakeHome = await mkdtemp(path.join(tmpdir(), 'bfo-cli-writeback-feishu-'));
+    await seedCompleteProjectProfile(fakeHome);
     const collector = createOutputCollector();
     const program = bootstrapCli({
       io: collector.io,

@@ -1,5 +1,42 @@
 # Architecture Notes
 
+## v2 任务 5 当前项目画像入口闸门层
+
+任务 5 的关键不是“让 workflow 知道更多配置”，而是先把一个更基础的架构漏洞堵住：在这之前，`run start` / `run brief` / `record jira` / `record feishu` 即使完全没有项目画像，也能先创建 run，再把后续失败留给更深层的流程。这会制造没有可信配置来源的空壳 run，破坏 `ProjectProfile` 作为唯一可信配置来源的设计前提。
+
+## 新增/调整文件职责
+
+### `src/app/cli-orchestration.ts`
+
+- 这一轮新增 `loadRequiredProjectProfile()`，把“主流程入口必须先拿到 ready 的项目画像”收敛到 app 层，而不是散落在 CLI 命令注册层或 workflow 初始化层。
+- `createCliRun()` 现在先做两件事，再允许进入 `initializeRun()`：
+  - 通过 `config-loader` 加载存储中的项目画像
+  - 如果配置不完整或非法，则通过 `mapProjectProfileValidationError()` 统一转换成结构化 CLI 错误
+- 这个文件现在还承担一个新的数据边界职责：run context 里的 `config_version` 必须来自真实项目画像，而不是应用层硬编码常量。
+
+### `tests/integration/cli/run-record-commands.spec.ts`
+
+- 这组测试现在不再把“可以随便创建 run”当作默认前提，而是显式写入项目画像种子后再测试 `run brief`、`record jira`、`bind-branch`、`ensure-subtask`、`provide-fix-commit` 等流程。
+- 它同时新增了任务 5 的专属保护断言：
+  - 缺失项目画像时，`run start` 和 `record feishu` 必须在 workflow 之前失败
+  - 配置版本非法时，`record jira` 必须返回结构化 `validation_error`
+  - 修复配置后，`run brief` 创建出的 context 必须带上真实 `config_version`
+
+### `tests/integration/cli/writeback-flows.spec.ts`
+
+- 这组测试现在会先准备完整项目画像，再进入 Jira/Feishu 子工作流。
+- 这样它开始显式验证一个新的架构事实：任务 3/4 打通的 writeback CLI 行为，并不是绕开项目画像的旁路，而是建立在任务 5 的入口闸门之上的。
+
+## 任务 5 架构洞察
+
+- 把项目画像加载放在 `src/app` 而不是 `src/cli/*`，是这一步最重要的分层选择。CLI 层应该只负责参数与展示；真正决定“这个命令能不能进入 workflow”的，是 app 层的用例装配。
+
+- `initializeRun()` 仍然保持纯粹，只接收已经准备好的 `projectId`、`configVersion` 和 snapshot ref，而不自己去读配置文件。这保住了 workflow/run lifecycle 与配置 I/O 的边界，避免 run lifecycle 反向依赖 skill 层。
+
+- `ProjectProfileValidationError` 被先转换成 `StructuredError`，再交给已有的 `mapErrorToCliFailure()` 统一出站，说明这一步没有新造一套 CLI 错误协议，而是复用了现有错误模型。这能让任务 6 以后接入真实 Jira 读取时继续沿用同一条错误出口。
+
+- 把 `config_version` 从 profile 实际透传进 context 看起来只是一个小改动，但它让恢复、审计和后续迁移终于能回答“这个 run 是基于哪一版项目画像启动的”。如果继续硬编码，后面即使有真实配置审计，也无法追溯 run 与配置版本的关系。
+
 ## v2 任务 4 步骤 4 当前 v2 Jira 执行决策层
 
 当 connector 契约和 ledger 顺序都稳定之后，最后一个缺口是：谁来决定 dry-run 和真实 execute 用的到底是不是同一份 payload，以及恢复时什么时候必须先 reconcile。这个判断如果分散在 CLI、app 和 workflow 多处，很容易出现“预览看的是一份 payload，真正执行发的是另一份”或者“看到 prepared 记录就直接重发”的风险。

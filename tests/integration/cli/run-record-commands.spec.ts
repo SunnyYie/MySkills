@@ -1,11 +1,16 @@
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
 import { bootstrapCli } from '../../../src/app/index.js';
-import { DRY_RUN_PERSISTENCE_POLICY, getRunPaths } from '../../../src/storage/index.js';
+import {
+  DRY_RUN_PERSISTENCE_POLICY,
+  getProjectProfilePath,
+  getRunPaths,
+  writeJsonAtomically,
+} from '../../../src/storage/index.js';
 
 const createOutputCollector = () => {
   let stdout = '';
@@ -37,6 +42,83 @@ const writeJsonFixture = async (
   const fixturePath = path.join(directory, fileName);
   await writeFile(fixturePath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
   return fixturePath;
+};
+
+const createCompleteProjectProfile = () => ({
+  project_id: 'proj-a',
+  project_name: 'Project A',
+  config_version: '2026-03-19',
+  jira: {
+    base_url: 'https://jira.example.com',
+    project_key: 'BUG',
+    issue_type_ids: ['10001'],
+    requirement_link_rules: [
+      {
+        source_type: 'issue_link',
+        priority: 1,
+        fallback_action: 'manual',
+      },
+    ],
+    writeback_targets: ['comment'],
+    subtask: {
+      issue_type_id: '10002',
+      summary_template: '[{issue_key}] {summary}',
+    },
+    branch_binding: {
+      target_issue_source: 'subtask',
+      fallback_to_bug: true,
+    },
+    commit_binding: {
+      target_issue_source: 'subtask',
+    },
+    credential_ref: 'cred:jira/project-a',
+  },
+  requirements: {
+    source_type: 'feishu_doc',
+    source_ref: 'doc://feishu/project-a',
+  },
+  gitlab: {
+    base_url: 'https://gitlab.example.com',
+    project_id: 'group/project-a',
+    default_branch: 'main',
+    branch_naming_rule: 'bugfix/{issue_key}',
+    branch_binding: {
+      input_mode: 'current_branch',
+    },
+    credential_ref: 'cred:gitlab/project-a',
+  },
+  feishu: {
+    space_id: 'space-1',
+    doc_id: 'doc-1',
+    block_path_or_anchor: 'root/bugs',
+    template_id: 'tpl-1',
+    template_version: 'v1',
+    credential_ref: 'cred:feishu/project-a',
+  },
+  repo: {
+    local_path: '/workspace/project-a',
+    module_rules: [{ module_id: 'api', path_pattern: 'src/api/**' }],
+  },
+  approval_policy: {
+    requirement_binding_required: true,
+  },
+  serialization_policy: {
+    persist_dry_run_previews: true,
+  },
+  sensitivity_policy: {
+    sensitive_field_paths: ['jira.credential_ref'],
+    prohibited_plaintext_fields: ['token'],
+  },
+});
+
+const seedCompleteProjectProfile = async (homeDir: string, projectId = 'proj-a') => {
+  await writeJsonAtomically(
+    getProjectProfilePath(projectId, homeDir),
+    {
+      ...createCompleteProjectProfile(),
+      project_id: projectId,
+    },
+  );
 };
 
 describe('CLI run and record commands', () => {
@@ -76,6 +158,7 @@ describe('CLI run and record commands', () => {
 
   it('creates brief-only and jira-writeback-only runs without bypassing shared workflow state', async () => {
     const fakeHome = await mkdtemp(path.join(tmpdir(), 'bfo-cli-run-record-'));
+    await seedCompleteProjectProfile(fakeHome);
     const collector = createOutputCollector();
     const program = bootstrapCli({
       io: collector.io,
@@ -162,8 +245,127 @@ describe('CLI run and record commands', () => {
     expect(collector.getStderr()).toBe('');
   });
 
+  it('requires a ready project profile before run and record commands can create runs', async () => {
+    const fakeHome = await mkdtemp(path.join(tmpdir(), 'bfo-cli-profile-gate-'));
+    const collector = createOutputCollector();
+    const program = bootstrapCli({
+      io: collector.io,
+      env: {
+        ...process.env,
+        BUGFIX_ORCHESTRATOR_HOME: fakeHome,
+      },
+    });
+    const storedProfilePath = getProjectProfilePath('proj-a', fakeHome);
+
+    await program.parseAsync([
+      'node',
+      'bugfix-orchestrator',
+      'run',
+      'start',
+      '--project',
+      'proj-a',
+      '--issue',
+      'BUG-100',
+      '--json',
+    ]);
+
+    const missingProfileOutput = JSON.parse(collector.getStdout().trim());
+    expect(missingProfileOutput).toMatchObject({
+      command: 'run start',
+      exitCode: 10,
+      error: {
+        category: 'configuration_missing',
+      },
+    });
+    await expect(
+      access(path.join(fakeHome, '.local', 'share', 'bugfix-orchestrator', 'runs')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+    collector.reset();
+
+    await program.parseAsync([
+      'node',
+      'bugfix-orchestrator',
+      'record',
+      'feishu',
+      '--project',
+      'proj-a',
+      '--json',
+    ]);
+
+    const missingFeishuProfileOutput = JSON.parse(collector.getStdout().trim());
+    expect(missingFeishuProfileOutput).toMatchObject({
+      command: 'record feishu',
+      exitCode: 10,
+      error: {
+        category: 'configuration_missing',
+      },
+    });
+
+    await writeJsonAtomically(storedProfilePath, {
+      ...createCompleteProjectProfile(),
+      config_version: 'v2',
+    });
+    collector.reset();
+
+    await program.parseAsync([
+      'node',
+      'bugfix-orchestrator',
+      'record',
+      'jira',
+      '--project',
+      'proj-a',
+      '--issue',
+      'BUG-100',
+      '--json',
+    ]);
+
+    const invalidProfileOutput = JSON.parse(collector.getStdout().trim());
+    expect(invalidProfileOutput).toMatchObject({
+      command: 'record jira',
+      exitCode: 2,
+      error: {
+        category: 'validation_error',
+        summary:
+          'config_version must use YYYY-MM-DD so project profiles stay versionable and auditable.',
+      },
+    });
+    await expect(
+      access(path.join(fakeHome, '.local', 'share', 'bugfix-orchestrator', 'runs')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+
+    await writeJsonAtomically(storedProfilePath, createCompleteProjectProfile());
+    collector.reset();
+
+    await program.parseAsync([
+      'node',
+      'bugfix-orchestrator',
+      'run',
+      'brief',
+      '--project',
+      'proj-a',
+      '--issue',
+      'BUG-100',
+      '--json',
+    ]);
+
+    const repairedOutput = JSON.parse(collector.getStdout().trim());
+    const repairedRunPaths = getRunPaths(repairedOutput.runId, fakeHome);
+    const repairedContext = JSON.parse(
+      await readFile(repairedRunPaths.contextFile, 'utf8'),
+    );
+
+    expect(repairedOutput).toMatchObject({
+      command: 'run brief',
+      exitCode: 0,
+      runMode: 'brief_only',
+    });
+    expect(repairedOutput.runId).toEqual(expect.any(String));
+    expect(repairedContext.config_version).toBe('2026-03-19');
+  });
+
   it('surfaces shared recovery and status semantics for record runs', async () => {
     const fakeHome = await mkdtemp(path.join(tmpdir(), 'bfo-cli-run-status-'));
+    await seedCompleteProjectProfile(fakeHome);
     const collector = createOutputCollector();
     const program = bootstrapCli({
       io: collector.io,
@@ -237,6 +439,7 @@ describe('CLI run and record commands', () => {
 
   it('records a bound branch as Execution input and keeps the run waiting for the remaining inputs', async () => {
     const fakeHome = await mkdtemp(path.join(tmpdir(), 'bfo-cli-bind-branch-'));
+    await seedCompleteProjectProfile(fakeHome);
     const collector = createOutputCollector();
     const program = bootstrapCli({
       io: collector.io,
@@ -315,6 +518,7 @@ describe('CLI run and record commands', () => {
 
   it('requires Execution inputs before ensure-subtask can generate an Artifact Linking preview', async () => {
     const fakeHome = await mkdtemp(path.join(tmpdir(), 'bfo-cli-ensure-subtask-'));
+    await seedCompleteProjectProfile(fakeHome);
     const fixtureDir = await mkdtemp(path.join(tmpdir(), 'bfo-cli-ensure-subtask-fixtures-'));
     const collector = createOutputCollector();
     const program = bootstrapCli({
@@ -465,6 +669,7 @@ describe('CLI run and record commands', () => {
 
   it('records fix commit ownership and resets Artifact Linking to regenerate preview', async () => {
     const fakeHome = await mkdtemp(path.join(tmpdir(), 'bfo-cli-fix-commit-'));
+    await seedCompleteProjectProfile(fakeHome);
     const fixtureDir = await mkdtemp(path.join(tmpdir(), 'bfo-cli-fix-commit-fixtures-'));
     const collector = createOutputCollector();
     const program = bootstrapCli({

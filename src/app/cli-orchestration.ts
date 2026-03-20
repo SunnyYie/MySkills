@@ -20,6 +20,10 @@ import {
   restoreRun,
 } from './run-lifecycle.js';
 import {
+  ProjectProfileValidationError,
+  loadProjectProfile,
+} from '../skills/config-loader/index.js';
+import {
   DRY_RUN_PERSISTENCE_POLICY,
   getCheckpointFilePath,
   getRunPaths,
@@ -326,6 +330,52 @@ const wrapCommand = async <T>(command: string, work: () => Promise<T>) => {
   }
 };
 
+const mapProjectProfileValidationError = (
+  error: ProjectProfileValidationError,
+) => {
+  const primaryIssue = error.inspection.issues[0];
+  const hasMissingField = error.inspection.issues.some(
+    (issue) => issue.code === 'missing_field',
+  );
+
+  return StructuredErrorSchema.parse({
+    code: hasMissingField ? 'PROJECT_PROFILE_INCOMPLETE' : 'PROJECT_PROFILE_INVALID',
+    category: hasMissingField ? 'configuration_missing' : 'validation_error',
+    stage: 'Intake',
+    system: 'app',
+    operation: 'load-project-profile',
+    target_ref: error.inspection.profilePath,
+    message:
+      primaryIssue?.message ??
+      `Project profile ${error.inspection.projectId} is incomplete or invalid.`,
+    detail: JSON.stringify({
+      project_id: error.inspection.projectId,
+      missing_fields: error.inspection.missingFields,
+      issue_paths: error.inspection.issues.map((issue) => issue.path),
+    }),
+    retryable: false,
+    outcome_unknown: false,
+    user_action:
+      primaryIssue?.nextAction ??
+      `Run inspect config --project ${error.inspection.projectId} and fill the reported gaps before retrying.`,
+    raw_cause_ref: null,
+    partial_state_ref: null,
+    timestamp: new Date().toISOString(),
+  });
+};
+
+const loadRequiredProjectProfile = async (projectId: string, homeDir?: string) => {
+  try {
+    return await loadProjectProfile({ projectId, homeDir });
+  } catch (error) {
+    if (error instanceof ProjectProfileValidationError) {
+      throw mapProjectProfileValidationError(error);
+    }
+
+    throw error;
+  }
+};
+
 export const createCliRun = async ({
   projectId,
   issueKey,
@@ -336,9 +386,10 @@ export const createCliRun = async ({
   initiator = DEFAULT_INITIATOR,
 }: StartRunInput) =>
   wrapCommand(runMode === 'brief_only' ? 'run brief' : 'run start', async () => {
+    const projectProfile = await loadRequiredProjectProfile(projectId, homeDir);
     const initialized = await initializeRun({
       projectId,
-      configVersion: '2026-03-19',
+      configVersion: projectProfile.config_version,
       jiraIssueSnapshotRef: `artifact://jira/${issueKey}`,
       initiator,
       homeDir,

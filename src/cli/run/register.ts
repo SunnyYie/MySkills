@@ -7,6 +7,7 @@ import {
   createCliRun,
   ensureCliSubtask,
   executeCliWrite,
+  getCliRunReport,
   getCliRunStatus,
   previewCliWrite,
   provideCliArtifacts,
@@ -147,6 +148,31 @@ export const registerRunCommands = (
           const payload = await getCliRunStatus({
             runId: options.run,
             checkpointId: options.checkpoint,
+            homeDir: runtime.homeDir,
+          });
+
+          await emitCliPayload({
+            runtime,
+            payload,
+            asJson: Boolean(options.json),
+            outputPath: options.output,
+          });
+        },
+      ),
+  );
+
+  addSharedOptions(
+    run
+      .command('report')
+      .requiredOption('--run <id>', 'run id')
+      .action(
+        async (options: {
+          run: string;
+          json?: boolean;
+          output?: string;
+        }) => {
+          const payload = await getCliRunReport({
+            runId: options.run,
             homeDir: runtime.homeDir,
           });
 

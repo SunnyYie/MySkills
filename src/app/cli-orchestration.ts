@@ -3,9 +3,11 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import {
+  FeishuRecordDraftSchema,
   BUGFIX_STAGES,
   CheckpointRecordSchema,
   ExecutionContextSchema,
+  JiraWritebackDraftSchema,
   JiraIssueSnapshotSchema,
   ProjectContextStageResultSchema,
   RequirementReferenceSchema,
@@ -32,8 +34,13 @@ import {
 } from '../skills/config-loader/index.js';
 import { resolveProjectContext } from '../skills/project-context/index.js';
 import { synthesizeRequirementBrief } from '../skills/requirement-summarizer/index.js';
+import { createBugfixReport } from '../skills/report-writer/index.js';
 import {
+  buildFeishuRecordPreviewDraft,
   buildJiraIssueSnapshot,
+  buildJiraWritebackPreviewDraft,
+  executeFeishuRecordWithStub,
+  executeJiraWritebackWithStub,
   readJiraIssueSnapshot,
 } from '../infrastructure/connectors/index.js';
 import {
@@ -43,6 +50,12 @@ import {
   readCheckpointRecords,
   writeJsonAtomically,
 } from '../storage/index.js';
+import {
+  createFeishuRecordPreviewState,
+} from '../workflow/feishu-writeback.js';
+import {
+  createJiraWritebackPreviewState,
+} from '../workflow/jira-writeback.js';
 import {
   applyApprovalDecision,
   applyRevisionRollback,
@@ -1291,6 +1304,35 @@ export const getCliRunStatus = async ({ runId, checkpointId, homeDir }: RunStatu
       runOutcomeStatus: string;
       waitingReason: string | null;
       allowedActions: string[];
+    };
+  });
+
+export const getCliRunReport = async ({ runId, homeDir }: RunStatusInput) =>
+  wrapCommand('run report', async () => {
+    const { context } = await loadContext(runId, homeDir);
+    const bugfixReport = createBugfixReport({
+      context,
+    });
+    const persistedReport = await persistArtifactDocument({
+      runId,
+      stage: context.current_stage,
+      kind: 'bugfix-report',
+      payload: bugfixReport,
+      homeDir,
+    });
+
+    return {
+      command: 'run report',
+      exitCode: CLI_EXIT_CODES.success,
+      runId,
+      reportRef: persistedReport.artifactRef,
+      bugfixReport,
+      dryRun: false,
+      nonInteractive: false,
+    } satisfies CliCommandSuccess & {
+      runId: string;
+      reportRef: string;
+      bugfixReport: ReturnType<typeof createBugfixReport>;
     };
   });
 
@@ -2552,41 +2594,126 @@ export const previewCliWrite = async ({
       });
     }
 
-    const preview = {
-      preview_ref: `preview://${runId}/${encodeURIComponent(stage)}/${Date.now()}`,
-      stage,
-      preview_hash: serializeHash({ runId, stage, dryRun }),
-      is_dry_run: dryRun,
-      generated_at: new Date().toISOString(),
-    } satisfies PreviewArtifact;
-    await persistArtifactDocument({
-      runId,
-      stage,
-      kind: stage === ARTIFACT_LINKING_STAGE ? 'jira-preview' : 'feishu-preview',
-      payload: preview,
+    const projectProfile = await loadRequiredProjectProfile(
+      context.project_id,
       homeDir,
-    });
-    const updated = await updateRun(runId, homeDir, 'write_preview_generated', async (context) => ({
-      ...context,
-      updated_at: preview.generated_at,
-      current_stage: stage,
-      waiting_reason: null,
-      stage_status_map: {
-        ...context.stage_status_map,
-        [stage]: 'output_ready',
-      },
-      ...(stage === ARTIFACT_LINKING_STAGE
-        ? { jira_writeback_draft_ref: preview.preview_ref }
-        : { feishu_record_draft_ref: preview.preview_ref }),
-    }));
+    );
+    const generatedAt = new Date().toISOString();
+    let issueSnapshot: JiraIssueSnapshot;
+
+    try {
+      issueSnapshot = JiraIssueSnapshotSchema.parse(
+        await readPersistedArtifact({
+          runId,
+          artifactRef: context.jira_issue_snapshot_ref,
+          homeDir,
+        }),
+      );
+    } catch (error) {
+      if (stage !== KNOWLEDGE_RECORDING_STAGE) {
+        throw error;
+      }
+
+      const fallbackIssueKey =
+        context.active_bug_issue_key ??
+        extractIssueKeyFromSnapshotRef(context.jira_issue_snapshot_ref) ??
+        'FEISHU-RECORD-ONLY';
+      issueSnapshot = createManualIssueSnapshot({
+        projectProfile,
+        issueKey: fallbackIssueKey,
+        problemSummary: 'Feishu record only run is waiting for manual bug context.',
+      });
+    }
+
+    let renderedPreview: string;
+    let requestPayload: unknown;
+    let requestPayloadHash: string;
+    let targetRef: string;
+    let previewRef: string;
+    let previewHash: string;
+    let nextContext: ExecutionContext;
+
+    if (stage === ARTIFACT_LINKING_STAGE) {
+      const draft = buildJiraWritebackPreviewDraft({
+        issueSnapshot,
+        target: issueSnapshot.writeback_targets[0]!,
+        gitlabArtifacts: context.gitlab_artifacts,
+        verificationResultsRef: context.verification_results_ref,
+        requirementRefs: context.requirement_refs,
+        generatedAt,
+      });
+      const persistedPreview = await persistArtifactDocument({
+        runId,
+        stage,
+        kind: 'jira-writeback-preview',
+        payload: draft,
+        homeDir,
+      });
+      const previewState = createJiraWritebackPreviewState({
+        context,
+        draftRef: persistedPreview.artifactRef,
+        draft,
+        updatedAt: generatedAt,
+      });
+
+      renderedPreview = draft.rendered_preview;
+      requestPayload = draft.request_payload;
+      requestPayloadHash = draft.request_payload_hash;
+      targetRef = draft.target_ref;
+      previewRef = persistedPreview.artifactRef;
+      previewHash = previewState.previewHash;
+      nextContext = previewState.context;
+    } else {
+      const draft = buildFeishuRecordPreviewDraft({
+        projectProfile,
+        issueSnapshot,
+        requirementRefs: context.requirement_refs,
+        gitlabArtifacts: context.gitlab_artifacts,
+        verificationResultsRef: context.verification_results_ref,
+        rootCauseHypotheses: context.root_cause_hypotheses,
+        fixPlan: context.fix_plan,
+        generatedAt,
+      });
+      const persistedPreview = await persistArtifactDocument({
+        runId,
+        stage,
+        kind: 'feishu-record-preview',
+        payload: draft,
+        homeDir,
+      });
+      const previewState = createFeishuRecordPreviewState({
+        context,
+        draftRef: persistedPreview.artifactRef,
+        draft,
+        updatedAt: generatedAt,
+      });
+
+      renderedPreview = draft.rendered_preview;
+      requestPayload = draft.request_payload;
+      requestPayloadHash = draft.request_payload_hash;
+      targetRef = draft.target_ref;
+      previewRef = persistedPreview.artifactRef;
+      previewHash = previewState.previewHash;
+      nextContext = previewState.context;
+    }
+    const updated = await updateRun(
+      runId,
+      homeDir,
+      'write_preview_generated',
+      async () => nextContext,
+    );
 
     return {
       command: 'run preview-write',
       exitCode: CLI_EXIT_CODES.success,
       runId,
       stage,
-      previewRef: preview.preview_ref,
-      previewHash: preview.preview_hash,
+      previewRef,
+      previewHash,
+      renderedPreview,
+      requestPayload,
+      requestPayloadHash,
+      targetRef,
       checkpointId: updated.checkpoint.checkpoint_id,
       dryRun,
       nonInteractive,
@@ -2655,23 +2782,69 @@ export const executeCliWrite = async ({
       });
     }
 
-    const result = {
-      result_ref: `result://${runId}/${encodeURIComponent(stage)}/${Date.now()}`,
-      stage,
-      source_preview_ref: previewRef,
-      executed_at: new Date().toISOString(),
-    } satisfies ResultArtifact;
-    await persistArtifactDocument({
-      runId,
-      stage,
-      kind: stage === ARTIFACT_LINKING_STAGE ? 'jira-result' : 'feishu-result',
-      payload: result,
-      homeDir,
-    });
+    const executedAt = new Date().toISOString();
+    let resultRef: string;
+    let targetRef: string;
+    let targetVersion: string;
+    let resultUrl: string;
+    let externalRequestId: string | null;
+
+    if (stage === ARTIFACT_LINKING_STAGE) {
+      const draft = JiraWritebackDraftSchema.parse(
+        await readPersistedArtifact({
+          runId,
+          artifactRef: previewRef,
+          homeDir,
+        }),
+      );
+      const result = executeJiraWritebackWithStub({
+        draft,
+        updatedAt: executedAt,
+      });
+      const persistedResult = await persistArtifactDocument({
+        runId,
+        stage,
+        kind: 'jira-writeback-result',
+        payload: result,
+        homeDir,
+      });
+
+      resultRef = persistedResult.artifactRef;
+      targetRef = result.target_ref;
+      targetVersion = result.target_version;
+      resultUrl = result.result_url;
+      externalRequestId = result.external_request_id;
+    } else {
+      const draft = FeishuRecordDraftSchema.parse(
+        await readPersistedArtifact({
+          runId,
+          artifactRef: previewRef,
+          homeDir,
+        }),
+      );
+      const result = executeFeishuRecordWithStub({
+        draft,
+        updatedAt: executedAt,
+      });
+      const persistedResult = await persistArtifactDocument({
+        runId,
+        stage,
+        kind: 'feishu-record-result',
+        payload: result,
+        homeDir,
+      });
+
+      resultRef = persistedResult.artifactRef;
+      targetRef = result.target_ref;
+      targetVersion = result.target_version;
+      resultUrl = result.result_url;
+      externalRequestId = result.external_request_id;
+    }
+
     const updated = await updateRun(runId, homeDir, 'write_executed', async (context) => {
       const nextContext: ExecutionContext = {
         ...context,
-        updated_at: result.executed_at,
+        updated_at: executedAt,
         current_stage: stage,
         stage_status_map: {
           ...context.stage_status_map,
@@ -2680,9 +2853,9 @@ export const executeCliWrite = async ({
       };
 
       if (stage === ARTIFACT_LINKING_STAGE) {
-        nextContext.jira_writeback_result_ref = result.result_ref;
+        nextContext.jira_writeback_result_ref = resultRef;
       } else {
-        nextContext.feishu_record_result_ref = result.result_ref;
+        nextContext.feishu_record_result_ref = resultRef;
       }
 
       if (
@@ -2702,7 +2875,11 @@ export const executeCliWrite = async ({
       runId,
       stage,
       previewRef,
-      resultRef: result.result_ref,
+      resultRef,
+      targetRef,
+      targetVersion,
+      resultUrl,
+      externalRequestId,
       checkpointId: updated.checkpoint.checkpoint_id,
       dryRun,
       nonInteractive,

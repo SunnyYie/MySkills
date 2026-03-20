@@ -292,6 +292,34 @@ describe('CLI writeback flows', () => {
     ]);
 
     const executeOutput = JSON.parse(collector.getStdout().trim());
+    collector.reset();
+    const reportOutputFile = path.join(fixtureDir, 'bugfix-report.md');
+
+    await program.parseAsync([
+      'node',
+      'bugfix-orchestrator',
+      'run',
+      'report',
+      '--run',
+      jiraRun.runId,
+      '--json',
+    ]);
+
+    const reportOutput = JSON.parse(collector.getStdout().trim());
+    collector.reset();
+
+    await program.parseAsync([
+      'node',
+      'bugfix-orchestrator',
+      'run',
+      'report',
+      '--run',
+      jiraRun.runId,
+      '--output',
+      reportOutputFile,
+    ]);
+
+    const renderedReport = await readFile(reportOutputFile, 'utf8');
     const runPaths = getRunPaths(jiraRun.runId, fakeHome);
     const context = JSON.parse(await readFile(runPaths.contextFile, 'utf8'));
 
@@ -306,12 +334,37 @@ describe('CLI writeback flows', () => {
       dryRun: true,
       dryRunArtifactTag: DRY_RUN_PERSISTENCE_POLICY.dryRunArtifactTag,
     });
+    expect(previewOutput.previewRef).toMatch(/^artifact:\/\/.+/);
+    expect(previewOutput.renderedPreview).toContain('Bugfix orchestrator update for BUG-900');
+    expect(previewOutput.renderedPreview).toContain(
+      'abcdef0123456789abcdef0123456789abcdef01',
+    );
+    expect(previewOutput.targetRef).toBe('jira://BUG-900/comment');
+    expect(previewOutput.requestPayloadHash).toMatch(/^sha256:/);
+    expect(previewOutput.requestPayload).toMatchObject({
+      body: previewOutput.renderedPreview,
+    });
     expect(executeOutput).toMatchObject({
       command: 'run execute-write',
       runId: jiraRun.runId,
       stage: 'Artifact Linking',
       previewRef: previewOutput.previewRef,
     });
+    expect(executeOutput.resultRef).toMatch(/^artifact:\/\/.+/);
+    expect(executeOutput.targetRef).toBe(previewOutput.targetRef);
+    expect(executeOutput.resultUrl).toBe('https://jira.example.com/browse/BUG-900');
+    expect(executeOutput.targetVersion).toBeTruthy();
+    expect(executeOutput.externalRequestId).toBeTruthy();
+    expect(reportOutput).toMatchObject({
+      command: 'run report',
+      runId: jiraRun.runId,
+    });
+    expect(reportOutput.bugfixReport.run_id).toBe(jiraRun.runId);
+    expect(reportOutput.bugfixReport.final_status).toBe('success');
+    expect(reportOutput.bugfixReport.artifacts).toContain(executeOutput.resultRef);
+    expect(renderedReport).toContain('# Bugfix Report');
+    expect(renderedReport).toContain(`- Run ID: ${jiraRun.runId}`);
+    expect(collector.getStdout()).toContain('Bugfix Report');
     expect(context).toMatchObject({
       current_stage: 'Artifact Linking',
       run_mode: 'jira_writeback_only',
@@ -419,12 +472,28 @@ describe('CLI writeback flows', () => {
       stage: 'Knowledge Recording',
       dryRun: true,
     });
+    expect(previewOutput.previewRef).toMatch(/^artifact:\/\/.+/);
+    expect(previewOutput.renderedPreview).toContain(
+      'Bugfix record for FEISHU-RECORD-ONLY',
+    );
+    expect(previewOutput.renderedPreview).toContain('所属需求: 未绑定需求');
+    expect(previewOutput.targetRef).toBe('feishu://space-1/doc/doc-1/anchor/root/bugs');
+    expect(previewOutput.requestPayloadHash).toMatch(/^sha256:/);
+    expect(previewOutput.requestPayload).toMatchObject({
+      body: previewOutput.renderedPreview,
+      write_mode: 'append',
+    });
     expect(executeOutput).toMatchObject({
       command: 'run execute-write',
       runId: feishuRun.runId,
       stage: 'Knowledge Recording',
       previewRef: previewOutput.previewRef,
     });
+    expect(executeOutput.resultRef).toMatch(/^artifact:\/\/.+/);
+    expect(executeOutput.targetRef).toBe(previewOutput.targetRef);
+    expect(executeOutput.resultUrl).toBe('https://feishu.example.com/doc/doc-1');
+    expect(executeOutput.targetVersion).toBeTruthy();
+    expect(executeOutput.externalRequestId).toBeTruthy();
     expect(context).toMatchObject({
       current_stage: 'Knowledge Recording',
       run_mode: 'feishu_record_only',

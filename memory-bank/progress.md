@@ -1,5 +1,228 @@
 # Progress
 
+## 2026-03-20 - v2 任务 11 步骤 4：补齐缺失 skill 的正式命名收敛
+
+### 本轮完成内容
+
+- 新增 `src/skills/feishu-recorder/index.ts`：
+  - 把已有 Feishu preview draft 与 stub execute 能力以正式 `feishu-recorder` skill 名义收拢起来
+  - 暴露 `prepareFeishuRecord()` 与 `executeFeishuRecord()` 两个结构化入口
+- 新增 `src/skills/approval-gate/index.ts`：
+  - 把既有 `applyApprovalDecision()` / `applyRevisionRollback()` 封装成正式 `approval-gate` skill 入口
+  - 让 approve / reject / revise 的状态决策有统一的 skill 命名落点
+- 新增 `src/skills/connector-router/index.ts`：
+  - 用最小结构化契约把 write stage 到外部系统的路由规则显式化
+  - 当前稳定覆盖 `Artifact Linking -> jira`、`Knowledge Recording -> feishu`
+- 新增 `src/skills/artifact-renderer/index.ts`：
+  - 把 Requirement Brief 与 Bugfix Report 的 CLI / Markdown / JSON 渲染统一收敛到正式 skill 命名下
+- 更新 `src/skills/index.ts`：
+  - 将上述 4 个正式 skill 纳入统一导出面
+- 新增 `tests/unit/skills/missing-skill-contracts.spec.ts`：
+  - 锁定四个 skill 的最小契约和命名收敛结果，防止后续再次退回“功能存在但没有正式 skill 名称”的状态
+
+### 依据
+
+- 用户指令：继续执行 v2 任务 11，并在每一步验证通过后同步 `progress.md` / `architecture.md`
+- `memory-bank/features/v2/实施计划.md` 任务 11 步骤 4：
+  - 补齐缺失 skill，或在不新增多余抽象的前提下完成正式命名收敛
+- `memory-bank/features/v1/需求文档.md`：
+  - 缺失 skill 至少包括 `feishu-recorder`、`approval-gate`、`connector-router`、`artifact-renderer`
+- `memory-bank/features/v1/技术方案.md`：
+  - skill 需要输入输出清晰、可独立调用、可被编排
+  - 渲染与 connector 选择不应继续散落为未命名的隐式逻辑
+
+### 验证记录
+
+1. 验证对象：任务 11 步骤 4 red 阶段
+   触发方式：先新增 `tests/unit/skills/missing-skill-contracts.spec.ts`，再运行 `npm run test:unit -- tests/unit/skills/missing-skill-contracts.spec.ts`
+   预期结果：实现前准确暴露 `approval-gate`、`artifact-renderer`、`connector-router`、`feishu-recorder` 这些模块尚不存在
+   实际结果：通过；red 阶段失败点为 Vitest 无法解析 `src/skills/approval-gate/index.js`
+
+2. 验证对象：任务 11 步骤 4 green 阶段
+   触发方式：实现 4 个正式 skill 封装并更新导出面后运行 `npm run test:unit -- tests/unit/skills/missing-skill-contracts.spec.ts`
+   预期结果：新增 skill 都能以结构化契约独立调用
+   实际结果：通过；unit 全量 `84/84` 通过
+
+3. 验证对象：任务 11 步骤 4 类型边界
+   触发方式：运行 `npm run typecheck`
+   预期结果：新 skill 的类型引用、stage 路由与渲染入口在类型上保持闭合
+   实际结果：通过；`typecheck` 退出码为 0
+
+4. 验证对象：任务 11 步骤 4 文档同步结果
+   触发方式：更新 `progress.md` / `architecture.md` 后运行 `npm run test:milestones -- tests/milestones/document-consistency.spec.ts`
+   预期结果：新增任务 11 步骤 4 记录不破坏文档一致性检查
+   实际结果：通过；milestones 全量 `3/3` 通过
+
+### 当前边界说明
+
+- 到步骤 4 为止，任务 11 要求的 preview、execute、report、缺失 skill 契约四条链路都已经落地。
+- 本轮对缺失 skill 采用的是“薄封装 + 正式命名收敛”策略，没有额外扩展新的业务状态 owner，也没有引入超出实施计划的新抽象层。
+- 下一步只剩最终全量验证、最终文档一致性检查，以及按用户要求合并回 `main` 并删除 worktree。
+
+## 2026-03-20 - v2 任务 11 步骤 3：打通 `Bugfix Report` 生成、CLI 查看与导出
+
+### 本轮完成内容
+
+- 在 `src/app/cli-orchestration.ts` 中新增 `run report` 用例：
+  - 读取当前 run 的 `ExecutionContext`
+  - 调用 `createBugfixReport()` 生成统一 `Bugfix Report`
+  - 将报告持久化为真实 report artifact，并返回 `reportRef`
+- 在 `src/cli/run/register.ts` 中注册 `run report --run <id>` 命令，正式把报告生成暴露为 CLI 能力。
+- 在 `src/cli/shared.ts` 中扩展共享输出层：
+  - 当 payload 中包含 `bugfixReport` 时，stdout 会渲染 CLI 版 `Bugfix Report`
+  - 当用户提供 `--output` 且未使用 `--json` 时，会自动导出 Markdown 版报告
+  - 当用户使用 `--json` 时，则直接输出结构化 JSON
+- 在 `src/skills/report-writer/index.ts` 中补齐空值兜底：
+  - 若当前 run 还没有根因摘要或修复摘要，会生成明确的默认说明文本，而不是因为空字符串违反 schema
+
+### 依据
+
+- 用户指令：继续执行 v2 任务 11，并在每一步验证通过后同步 `progress.md` / `architecture.md`
+- `memory-bank/features/v2/实施计划.md` 任务 11 步骤 3：
+  - 打通统一 `Bugfix Report` 的生成、CLI 查看和 Markdown / JSON 导出
+- `memory-bank/features/v1/需求文档.md`：
+  - 系统需要将处理上下文、外部回写结果和验证结果沉淀为统一报告
+- `memory-bank/features/v1/技术方案.md`：
+  - `report-writer` 是正式 skill，renderers 负责 CLI / Markdown / JSON 表达，不应由 skill 或 app 手工承担渲染
+
+### 验证记录
+
+1. 验证对象：任务 11 步骤 3 red 阶段
+   触发方式：先在 `tests/integration/cli/writeback-flows.spec.ts` 增加 `run report` JSON / Markdown 导出断言，再运行 `npm run test:integration -- tests/integration/cli/writeback-flows.spec.ts`
+   预期结果：实现前准确暴露 `run report` 命令尚未注册
+   实际结果：通过；red 阶段失败点为 commander 报 unknown command
+
+2. 验证对象：任务 11 步骤 3 green 阶段
+   触发方式：实现 `run report` 命令、共享渲染出口与报告 artifact 持久化后运行 `npm run test:integration -- tests/integration/cli/writeback-flows.spec.ts`
+   预期结果：已完成的 run 能输出 JSON 报告、在终端查看 CLI 版报告，并导出 Markdown 文件
+   实际结果：通过；integration 全量 `33/33` 通过
+
+3. 验证对象：任务 11 步骤 3 类型边界
+   触发方式：运行 `npm run typecheck`
+   预期结果：`Bugfix Report` 用例、共享输出层和默认摘要兜底在类型上保持闭合
+   实际结果：通过；`typecheck` 退出码为 0
+
+4. 验证对象：任务 11 步骤 3 文档同步结果
+   触发方式：更新 `progress.md` / `architecture.md` 后运行 `npm run test:milestones -- tests/milestones/document-consistency.spec.ts`
+   预期结果：新增任务 11 步骤 3 记录不破坏文档一致性检查
+   实际结果：通过；milestones 全量 `3/3` 通过
+
+### 当前边界说明
+
+- 到步骤 3 为止，`Bugfix Report` 已经形成正式 CLI 能力，支持终端查看、Markdown 导出和 JSON 输出。
+- 当前报告仍主要基于 `ExecutionContext` 投影生成，审批历史尚未额外回放完整历史记录；这不影响当前实施计划要求的用户能力闭环，但后续如果要做更细粒度审计增强，可以继续建立在现有 report artifact 基线上。
+- 本轮还没有进入任务 11 步骤 4，因此 `feishu-recorder`、`approval-gate`、`connector-router`、`artifact-renderer` 的正式命名收敛仍待补齐。
+
+## 2026-03-20 - v2 任务 11 步骤 2：让 `execute-write` 记录真实 connector/stub result
+
+### 本轮完成内容
+
+- 在 `src/infrastructure/connectors/jira/index.ts` 中新增 `executeJiraWritebackWithStub()`：
+  - 基于已持久化的 Jira preview draft 生成规范化 `JiraWritebackResult`
+  - 返回真实 `target_ref`、`target_version`、`result_url` 与 `external_request_id`
+- 在 `src/infrastructure/connectors/feishu/index.ts` 中新增 `executeFeishuRecordWithStub()`：
+  - 基于已持久化的 Feishu preview draft 生成规范化 `FeishuRecordResult`
+  - 统一返回文档目标、版本、结果 URL 与 stub request id
+- 在 `src/app/cli-orchestration.ts` 中把 `run execute-write` 从占位 result 升级成真实 result 装配：
+  - 根据 stage 读取并校验 `previewRef` 对应的持久化 draft artifact
+  - 调用对应 stub connector 生成规范化 result
+  - 把 result 持久化为真实 artifact ref，并把 `jira_writeback_result_ref` / `feishu_record_result_ref` 更新到当前 run
+  - CLI 返回值现在会显式暴露 `resultRef`、`targetRef`、`targetVersion`、`resultUrl`、`externalRequestId`
+
+### 依据
+
+- 用户指令：继续执行 v2 任务 11，并在每一步验证通过后同步 `progress.md` / `architecture.md`
+- `memory-bank/features/v2/实施计划.md` 任务 11 步骤 2：
+  - 让 `execute-write` 通过真实 connector 或受控 stub connector 执行真实契约校验，并记录真实 result
+- `memory-bank/features/v1/需求文档.md`：
+  - 外部写操作必须先 preview，再 execute
+  - 出现写回失败或中断时，必须保留 payload 和结果信息，便于后续恢复
+- `memory-bank/features/v1/技术方案.md`：
+  - Infrastructure 层是唯一外部系统写入入口
+  - Workflow/App 层负责决定何时允许真实写入，并把结果写回统一 run 状态
+
+### 验证记录
+
+1. 验证对象：任务 11 步骤 2 red 阶段
+   触发方式：先在 `tests/integration/cli/writeback-flows.spec.ts` 增加 execute result 断言，再运行 `npm run test:integration -- tests/integration/cli/writeback-flows.spec.ts`
+   预期结果：实现前准确暴露 `execute-write` 仍返回占位 `result://` ref，且缺少真实 target/version/url 字段
+   实际结果：通过；red 阶段失败点为两个子工作流都返回了占位 `result://...` ref
+
+2. 验证对象：任务 11 步骤 2 green 阶段
+   触发方式：实现 stub connector result 装配后运行 `npm run test:integration -- tests/integration/cli/writeback-flows.spec.ts`
+   预期结果：Jira / Feishu execute 都返回真实 result artifact ref，以及 connector 归一化后的 target/version/url/request id
+   实际结果：通过；integration 全量 `33/33` 通过
+
+3. 验证对象：任务 11 步骤 2 类型边界
+   触发方式：运行 `npm run typecheck`
+   预期结果：preview draft 解析、stub execute result 装配与 CLI 返回值在类型上保持闭合
+   实际结果：通过；`typecheck` 退出码为 0
+
+4. 验证对象：任务 11 步骤 2 文档同步结果
+   触发方式：更新 `progress.md` / `architecture.md` 后运行 `npm run test:milestones -- tests/milestones/document-consistency.spec.ts`
+   预期结果：新增任务 11 步骤 2 记录不破坏文档一致性检查
+   实际结果：通过；milestones 全量 `3/3` 通过
+
+### 当前边界说明
+
+- 到步骤 2 为止，writeback 子工作流的 preview 与 execute 都已经基于正式 draft/result 契约运行，不再依赖占位 ref。
+- 本轮仍使用受控 stub connector，而不是真实外部 API；这符合实施计划中“真实 connector 或受控 stub connector”的允许边界，也为后续接入真实外部副作用保留了明确替换点。
+- 本轮还没有进入任务 11 步骤 3 / 4，因此 `Bugfix Report` 的 CLI 导出能力和缺失 skill 的正式命名收敛仍待后续补齐。
+
+## 2026-03-20 - v2 任务 11 步骤 1：让 `preview-write` 输出真实 preview 与结构化 payload
+
+### 本轮完成内容
+
+- 在 `src/app/cli-orchestration.ts` 中把 `run preview-write` 从占位 preview artifact 改成真实 draft 预览：
+  - `Artifact Linking` 现在复用 Jira connector 的 `buildJiraWritebackPreviewDraft()` 生成真实 `rendered_preview`、`request_payload`、`request_payload_hash`
+  - `Knowledge Recording` 现在复用 Feishu connector 的 `buildFeishuRecordPreviewDraft()` 生成真实 preview，而不是只回传一个临时 `preview://` 占位 ref
+  - 两类 preview 现在都会把 `previewRef` 指向真实持久化的 draft artifact，并把 `targetRef`、`renderedPreview`、`requestPayload`、`requestPayloadHash` 一并返回给 CLI
+- 同时把 preview 的上下文推进收口到既有 workflow helper：
+  - Jira 预览复用 `createJiraWritebackPreviewState()`
+  - Feishu 预览复用 `createFeishuRecordPreviewState()`
+- 为兼容空壳 `record feishu` 子工作流，本轮补了一条最小回退：
+  - 若当前 run 还没有持久化 Jira snapshot，Feishu preview 会基于当前 run 的 issue key 生成最小手工 snapshot 作为 preview 输入，而不是直接崩溃
+
+### 依据
+
+- 用户指令：继续执行 v2 任务 11，并在每一步验证通过后同步 `progress.md` / `architecture.md`
+- `memory-bank/features/v2/实施计划.md` 任务 11 步骤 1：
+  - 让 `preview-write` 输出真实 `rendered_preview` 与结构化 payload
+- `memory-bank/features/v1/需求文档.md`：
+  - 所有外部写操作默认先 preview，再 execute
+  - dry-run 场景必须输出结构化 preview，而不是发生真实副作用
+- `memory-bank/features/v1/技术方案.md`：
+  - Workflow/Agent 层负责决定何时生成 preview
+  - Connector / Skill 负责返回结构化结果，不由 CLI 层手工拼装业务 payload
+
+### 验证记录
+
+1. 验证对象：任务 11 步骤 1 red 阶段
+   触发方式：先在 `tests/integration/cli/writeback-flows.spec.ts` 增加 Jira / Feishu preview 输出断言，再运行 `npm run test:integration -- tests/integration/cli/writeback-flows.spec.ts`
+   预期结果：实现前准确暴露 `preview-write` 仍返回占位 `preview://` ref，且未返回真实 preview 文本与结构化 payload
+   实际结果：通过；red 阶段失败点为两个子工作流都返回了占位 `preview://...` ref
+
+2. 验证对象：任务 11 步骤 1 green 阶段
+   触发方式：实现真实 preview draft 输出后运行 `npm run test:integration -- tests/integration/cli/writeback-flows.spec.ts`
+   预期结果：Jira / Feishu preview 都返回真实 artifact ref、`renderedPreview`、`requestPayload`、`requestPayloadHash`
+   实际结果：通过；integration 全量 `33/33` 通过
+
+3. 验证对象：任务 11 步骤 1 类型边界
+   触发方式：运行 `npm run typecheck`
+   预期结果：preview draft 装配、回退 snapshot 与返回 payload 在类型上保持闭合
+   实际结果：通过；`typecheck` 退出码为 0
+
+4. 验证对象：任务 11 步骤 1 文档同步结果
+   触发方式：更新 `progress.md` / `architecture.md` 后运行 `npm run test:milestones -- tests/milestones/document-consistency.spec.ts`
+   预期结果：新增任务 11 步骤 1 记录不破坏文档一致性检查
+   实际结果：通过；milestones 全量 `3/3` 通过
+
+### 当前边界说明
+
+- 到步骤 1 为止，`preview-write` 已经是基于真实 connector draft 的用户能力，不再是占位 preview。
+- 本轮还没有进入任务 11 步骤 2，因此 `execute-write` 仍然只是占位 result，尚未真正复用 connector execute/result 契约。
+- 本轮还没有进入任务 11 步骤 3 / 4，因此 `Bugfix Report` CLI 导出能力和缺失 skill 的正式落点仍待后续补齐。
+
 ## 2026-03-20 - v2 任务 10 步骤 4：确保子工作流不绕过审批门与 preview 机制
 
 ### 本轮完成内容

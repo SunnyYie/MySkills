@@ -657,6 +657,31 @@ export const createJiraAlreadyAppliedResult = ({
     updated_at: updatedAt,
   });
 
+export const executeJiraWritebackWithStub = ({
+  draft,
+  updatedAt,
+  externalRequestId,
+}: {
+  draft: JiraWritebackDraft;
+  updatedAt: string;
+  externalRequestId?: string | null;
+}): JiraWritebackResult => {
+  const requestHashSuffix = draft.request_payload_hash.slice(
+    'sha256:'.length,
+    'sha256:'.length + 12,
+  );
+
+  return createJiraExecuteResult({
+    resultId: `jira-writeback:${draft.issue_key}:${requestHashSuffix}`,
+    targetRef: draft.target_ref,
+    targetVersion: `stub-${requestHashSuffix}`,
+    issueKey: draft.issue_key,
+    updatedAt,
+    externalRequestId:
+      externalRequestId ?? `stub:jira:${draft.issue_key}:${requestHashSuffix}`,
+  });
+};
+
 export const createJiraSubtaskExecuteResult = ({
   resultId,
   parentIssueKey,

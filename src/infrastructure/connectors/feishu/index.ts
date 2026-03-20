@@ -249,3 +249,28 @@ export const createFeishuAlreadyAppliedResult = ({
     external_request_id: externalRequestId,
     updated_at: updatedAt,
   });
+
+export const executeFeishuRecordWithStub = ({
+  draft,
+  updatedAt,
+  externalRequestId,
+}: {
+  draft: FeishuRecordDraft;
+  updatedAt: string;
+  externalRequestId?: string | null;
+}): FeishuRecordResult => {
+  const requestHashSuffix = draft.request_payload_hash.slice(
+    'sha256:'.length,
+    'sha256:'.length + 12,
+  );
+
+  return createFeishuExecuteResult({
+    resultId: `feishu-record:${draft.doc_id}:${requestHashSuffix}`,
+    targetRef: draft.target_ref,
+    targetVersion: `stub-${requestHashSuffix}`,
+    resultUrl: `https://feishu.example.com/doc/${draft.doc_id}`,
+    externalRequestId:
+      externalRequestId ?? `stub:feishu:${draft.doc_id}:${requestHashSuffix}`,
+    updatedAt,
+  });
+};

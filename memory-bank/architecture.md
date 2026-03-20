@@ -1,5 +1,206 @@
 # Architecture Notes
 
+## v2 任务 11 步骤 4 当前缺失 skill 命名收敛层
+
+到步骤 3 为止，系统已经具备真实 preview / execute / report 用户能力，但仍有一个结构性缺口：一些关键能力其实已经存在于 connector、workflow 或 renderer 中，却还没有按需求文档的正式 skill 名称落地。步骤 4 的目标不是再造一层新框架，而是把这些隐式能力收拢成正式 skill 入口，让文档、代码和测试的命名 finally 对齐。
+
+## 新增/调整文件职责
+
+### `src/skills/feishu-recorder/index.ts`
+
+- 这个文件正式承接 `feishu-recorder` skill：
+  - `prepareFeishuRecord()` 负责生成 Feishu preview draft
+  - `executeFeishuRecord()` 负责调用受控 stub execute
+- 它没有复制 connector 逻辑，而是给现有 Feishu writeback 契约补上正式 skill 名称与结构化入口。
+
+### `src/skills/approval-gate/index.ts`
+
+- 这个文件把审批状态转换正式收口成 `approval-gate` skill：
+  - approve / reject 复用 `applyApprovalDecision()`
+  - revise 复用 `applyRevisionRollback()`
+- 它的价值不在于新增决策逻辑，而在于把“审批门”从 workflow helper 提升成一个可命名、可直接测试的正式能力点。
+
+### `src/skills/connector-router/index.ts`
+
+- 这个文件为写回阶段补齐了显式路由层：
+  - `Artifact Linking` 路由到 Jira
+  - `Knowledge Recording` 路由到 Feishu
+- 这让“哪个 stage 对应哪个外部系统”不再藏在调用方局部判断里，而是拥有了一个清晰的命名归属。
+
+### `src/skills/artifact-renderer/index.ts`
+
+- 这个文件把 Requirement Brief 与 Bugfix Report 的渲染统一成正式 `artifact-renderer` skill。
+- 它现在承担“同一 artifact 在 CLI / Markdown / JSON 三种格式下如何表达”的职责，把渲染命名从散落 renderer helper 收到了一个可复用 skill 入口上。
+
+### `src/skills/index.ts`
+
+- 这个统一导出面现在开始显式暴露：
+  - `approval-gate`
+  - `artifact-renderer`
+  - `connector-router`
+  - `feishu-recorder`
+- 这意味着缺失 skill 不再只是目录层面的概念，而已经成为代码导出面的一部分。
+
+### `tests/unit/skills/missing-skill-contracts.spec.ts`
+
+- 这个文件是本步新增的命名收敛保护层：
+  - 检查 connector-router 的 stage 路由
+  - 检查 artifact-renderer 的统一渲染入口
+  - 检查 feishu-recorder 的 draft / execute 结构化契约
+  - 检查 approval-gate 的状态语义是否仍和 workflow 状态机对齐
+- 它保护的不是 happy path，而是“这些 skill 以后还是否真的存在并且保持正式契约”。
+
+## 任务 11 步骤 4 架构洞察
+
+- 这一步最重要的意义，是把“功能已经有了”提升成“能力有正式名字、正式入口和正式测试”。对 agent 编排系统来说，这两者不是一回事；没有命名收敛的能力，很难在后续文档、测试和编排中持续稳定引用。
+
+- 采用薄封装而不是重构 owner，保证了本步没有扩 scope。connector 仍然负责外部契约，workflow 仍然负责状态机，renderer 仍然负责呈现；新 skill 只是把这些既有能力以需求文档认可的名称收口起来。
+
+- `approval-gate` 与 `connector-router` 这两个 skill 的加入，让“什么时候允许过审批门”“当前 stage 应该去哪个外部系统”这两类高价值隐式规则第一次拥有了单独的、可测试的命名模块。这会显著降低后续继续扩展时的认知成本。
+
+- `artifact-renderer` 的出现，也让 Requirement Brief 和 Bugfix Report 终于在命名层面站到同一条渲染抽象上。以后如果再增加别的对外交付 artifact，不需要重新决定“这是 renderer 还是 skill”，而可以直接沿用现有命名模式。
+
+## v2 任务 11 步骤 3 当前报告导出层
+
+步骤 2 让 preview / execute 都已经回到正式 draft/result 契约后，run 里终于有了足够稳定的事实源来生成统一报告。步骤 3 的重点不是再发明一份 report schema，而是把已有 `report-writer` skill 和 `report` renderer 真正接到 CLI 入口与 artifact 持久化上，让 `Bugfix Report` 从内部能力变成正式用户能力。
+
+## 新增/调整文件职责
+
+### `src/app/cli-orchestration.ts`
+
+- 这个文件新增了 `run report` 应用用例：
+  - 从当前 run 读取 `ExecutionContext`
+  - 调用 `createBugfixReport()` 生成统一报告
+  - 把报告持久化成 report artifact，并把结果交给 CLI 输出层
+- 这让 app 层承担了“报告生成请求的一次性装配”职责，但它仍然不自己渲染 Markdown / CLI 文本。
+
+### `src/cli/run/register.ts`
+
+- 这个文件现在正式暴露 `run report --run <id>` 命令。
+- 这意味着报告导出不再只是内部 helper 或测试辅助，而是和 `run status`、`run preview-write` 一样成为正式 CLI 子命令。
+
+### `src/cli/shared.ts`
+
+- 这个共享输出层现在开始识别 `bugfixReport` payload：
+  - stdout 渲染 CLI 版报告
+  - `--output` 导出 Markdown 版报告
+  - `--json` 输出结构化 JSON
+- 这是一个很重要的分层收敛点，因为它让 `Bugfix Report` 复用了统一输出管道，而不是在 app 层或 command handler 里特判拼字符串。
+
+### `src/skills/report-writer/index.ts`
+
+- 这个 skill 在本步补齐了空值兜底职责：
+  - 没有根因摘要时返回明确说明
+  - 没有修复摘要时返回明确说明
+- 这保证了报告可以覆盖 `jira_writeback_only`、`feishu_record_only` 等不完整主流程 run，而不会因为空字符串违反 schema。
+
+### `tests/integration/cli/writeback-flows.spec.ts`
+
+- 本步把它扩展成报告交付能力的集成保护面：
+  - `run report --json` 必须返回结构化 `bugfixReport`
+  - `run report --output <file>` 必须导出 Markdown
+  - 非 JSON stdout 必须展示 CLI 版 `Bugfix Report`
+- 它保护的是“run 完成 -> report skill -> renderer -> CLI/output file”的整条链。
+
+## 任务 11 步骤 3 架构洞察
+
+- 报告生成现在正式站在 `ExecutionContext` 和已落盘 artifact 之上，而不是直接回看测试夹具或临时命令输入。这让 `Bugfix Report` 真正成为 workflow 的后置产物，而不是额外拼装的旁路文档。
+
+- `bugfixReport` 被接进 `cli/shared.ts`，说明报告渲染第一次和 Requirement Brief 一样，拥有了统一的“stdout / markdown file / json”三态出口。这是 renderer 层职责被真正执行的信号。
+
+- 为 report writer 补默认摘要不是在放宽报告标准，而是在承认子工作流 run 的信息密度本来就低于完整主流程。与其让 schema 因空字符串失败，不如把“尚未记录”保留成明确、可审阅的业务信息。
+
+- 本步没有把报告逻辑塞进 writeback command，也没有把 Markdown 模板塞回 skill 层，继续保持了技术方案要求的分层：skill 负责结构化报告对象，renderer 负责呈现，CLI/app 负责触发与落地。
+
+## v2 任务 11 步骤 2 当前 stub execute 收敛层
+
+步骤 1 已经把 writeback preview 变成真实 draft artifact，但只要 `execute-write` 还在返回占位 `result://`，整条写回链在工程上仍然不闭合。步骤 2 的核心不是接入真实外网，而是把 execute 正式收口到 connector 契约上：由受控 stub connector 产生规范化 result，再由 app 层负责落盘和更新 run。
+
+## 新增/调整文件职责
+
+### `src/infrastructure/connectors/jira/index.ts`
+
+- 这个文件新增了 `executeJiraWritebackWithStub()`：
+  - 输入是已经持久化的 Jira preview draft
+  - 输出是规范化的 `JiraWritebackResult`
+  - 结果里会稳定给出 `target_ref`、`target_version`、`result_url` 与 `external_request_id`
+- 这让 Jira writeback 第一次拥有了一个明确的“受控 execute 实现点”，后续要换成真实 connector 时，不需要重写 app 层的状态推进逻辑。
+
+### `src/infrastructure/connectors/feishu/index.ts`
+
+- 这个文件新增了 `executeFeishuRecordWithStub()`，职责与 Jira 的 stub execute 对称：
+  - 读取 Feishu draft 的目标与 payload hash
+  - 生成规范化 `FeishuRecordResult`
+  - 返回文档目标、版本和 request id
+- 这让 Feishu execute 也回到了 infrastructure 层，而不是继续在 app 层手工拼结果对象。
+
+### `src/app/cli-orchestration.ts`
+
+- 这个文件现在承担 execute 装配 owner 的职责：
+  - 根据 stage 读取 `previewRef` 对应的持久化 draft artifact
+  - 交给对应 stub connector 生成 result
+  - 把 result 持久化为真实 artifact，并回写 `jira_writeback_result_ref` / `feishu_record_result_ref`
+- 这意味着 app 层在 execute 阶段只负责“装配、落盘、推进状态”，而不再手工发明 result 结构。
+
+### `tests/integration/cli/writeback-flows.spec.ts`
+
+- 本步把它进一步扩展成 execute 契约保护面：
+  - `resultRef` 必须是持久化 artifact ref
+  - 结果里必须有 `targetRef`、`targetVersion`、`resultUrl` 和 `externalRequestId`
+- 它现在开始保护“审批后的 execute 是否真的消费 preview draft 并产出规范化 result”这条链，而不是只验证命令能返回 0。
+
+## 任务 11 步骤 2 架构洞察
+
+- 受控 stub connector 的引入，是一个很有价值的中间层收敛。它让我们在不引入真实外部副作用的前提下，先把 execute 的输入输出契约、状态推进和 artifact 持久化全部走通。
+
+- execute 现在要求先读取 `previewRef` 对应的持久化 draft，再生成 result。这让 preview 和 execute 首次形成了明确的数据依赖，而不是各自产生一份互相无关的占位对象。
+
+- `resultRef` 改成真实 artifact ref 后，run 上下文里保存的 `jira_writeback_result_ref` / `feishu_record_result_ref` 开始真正指向可复盘结果。这对后续报告导出、恢复、审计都很重要。
+
+- 本步仍然没有把 execute 直接下沉成“app 层直接调用网络”。这保持了技术方案要求的分层边界：外部系统契约在 infrastructure 层，workflow/app 只拥有流程控制权。
+
+## v2 任务 11 步骤 1 当前真实 preview 装配层
+
+任务 10 步骤 4 已经把 write-stage 的门禁收住了，但当时的 `preview-write` 仍然只是写一个占位 preview artifact。步骤 1 的重点不是新增一个写回阶段，而是让现有的 preview 门真正消费 Jira / Feishu connector 已有的 draft 契约，把“可以审批的预览”变成有正文、有 payload、有 target ref 的正式产物。
+
+## 新增/调整文件职责
+
+### `src/app/cli-orchestration.ts`
+
+- 这个文件现在开始真正承担 write preview 装配 owner 的职责：
+  - `run preview-write` 会根据当前 stage 读取项目画像、当前 run 上下文和 Jira snapshot
+  - `Artifact Linking` 复用 `buildJiraWritebackPreviewDraft()` 生成 Jira preview draft
+  - `Knowledge Recording` 复用 `buildFeishuRecordPreviewDraft()` 生成 Feishu preview draft
+  - 生成后的 draft 会被持久化成真实 artifact ref，并再交给 `createJiraWritebackPreviewState()` / `createFeishuRecordPreviewState()` 收口回 workflow context
+- 这意味着 app 层终于不再手工拼一个“伪 preview”，而是改成消费 connector 提供的正式写回草稿。
+
+### `src/infrastructure/connectors/jira/index.ts`
+
+- 这个文件在本步没有新增代码，但它的 `buildJiraWritebackPreviewDraft()` 第一次被真正接到 CLI preview 用户能力上。
+- 它现在不再只是一个 unit-test 中可见的 helper，而成为 `run preview-write --stage "Artifact Linking"` 的业务事实源。
+
+### `src/infrastructure/connectors/feishu/index.ts`
+
+- 同样地，这个文件的 `buildFeishuRecordPreviewDraft()` 也在本步第一次成为真实 CLI 能力的上游来源。
+- 这让 Feishu preview 的正文、payload、幂等键与 target ref 全都统一来自 connector 契约，而不是由 CLI 层局部重写一份近似结构。
+
+### `tests/integration/cli/writeback-flows.spec.ts`
+
+- 本步把它从“只校验 preview / execute 命令能走通”升级成“校验 preview 真正文档内容与 payload”的集成保护面：
+  - Jira preview 必须返回真实 artifact ref、正文、payload hash 与 Jira target ref
+  - Feishu preview 必须返回真实 artifact ref、正文、payload hash 与 Feishu target ref
+- 它现在保护的不是单个字段，而是“CLI write preview -> connector draft -> persisted artifact -> workflow context”整条链。
+
+## 任务 11 步骤 1 架构洞察
+
+- write-stage preview 现在开始真正拥有“内容事实源”。这很关键，因为后续 approve / execute 审批的对象终于不再是一个抽象的 preview id，而是一个可复盘、可哈希、可持久化的正式 draft artifact。
+
+- `previewRef` 从临时 `preview://` 切到持久化 `artifact://...`，让审批引用和后续 execute 输入开始围绕 durable artifact 运转。这和前面 requirement binding / checkpoint continue 的收敛方向一致，都是把中间态从内存或瞬时标识转回持久化事实源。
+
+- Feishu preview 为空壳 `record feishu` 补了一条最小 snapshot 回退，不是为了放宽输入边界，而是为了让“独立知识记录子工作流”在没有完整 Jira intake 的前提下，仍能生成一个可审阅的 preview 草稿。它补的是 preview 输入基线，而不是绕过 workflow。
+
+- 本步没有引入新的 preview schema，也没有把 draft 装配挪到 renderer 或 tests helper 中，说明任务 11 仍然遵守了既有分层：connector 负责构造结构化写回草稿，app 负责装配并把它接进 workflow 状态机。
+
 ## v2 任务 10 步骤 4 当前 write-stage 门禁层
 
 步骤 3 已经让 requirement 补录后的 run 能继续前进，但如果 `preview-write` 能在错误阶段被直接调用，或者 `execute-write` 不需要先 approve 就能成功，那子工作流其实仍然存在旁路。本步的重点不是改变 preview / execute 的数据结构，而是把“什么时候允许 preview、什么时候允许真正 execute”重新收口到明确的 workflow 门禁上。

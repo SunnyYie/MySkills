@@ -32,10 +32,12 @@ const formatCodeLocations = (context: ExecutionContext) =>
   );
 
 const formatRootCauseSummary = (context: ExecutionContext) =>
-  uniqueValues(context.root_cause_hypotheses).join(' ');
+  uniqueValues(context.root_cause_hypotheses).join(' ') ||
+  'Root cause analysis has not been recorded yet.';
 
 const formatFixSummary = (context: ExecutionContext) =>
-  uniqueValues(context.fix_plan).join(' ');
+  uniqueValues(context.fix_plan).join(' ') ||
+  'Fix summary has not been recorded yet.';
 
 const formatVerificationSummary = ({
   context,

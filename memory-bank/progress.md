@@ -1,5 +1,206 @@
 # Progress
 
+## 2026-03-20 - v2 任务 7 步骤 4：稳住 revise、stale、恢复与重复执行语义
+
+### 本轮完成内容
+
+- 在 `src/app/cli-orchestration.ts` 的 `approveCliRunStage()` 中补齐分析审批门的重复执行防护：
+  - 只有当 `current_stage === target stage`
+  - 且 `stage_status_map[target stage] === waiting_approval`
+  时，`run approve` 才允许继续
+- 对已经越过的分析审批门再次执行 `run approve`，现在会返回结构化 CLI 校验失败，而不会重复生成 `Code Localization` / `Fix Planning` artifact，也不会重复追加 checkpoint。
+- 继续复用现有 `applyRevisionRollback()`：
+  - 从 `Fix Planning` 回退到 `Requirement Synthesis` 时，把下游阶段标记为 `stale`
+  - 删除 rollback scope 内当前有效 `stage_artifact_refs`
+  - 清空 `code_targets`、`root_cause_hypotheses`、`fix_plan`、`verification_plan` 等当前有效投影
+- `run resume` 在 analysis gate revise 后继续复用既有恢复语义：
+  - 当前阶段为 `Requirement Synthesis`
+  - `recovery.action = resume_current_stage`
+- 在 `tests/integration/cli/run-record-commands.spec.ts` 中补齐步骤 4 的 red/green 覆盖：
+  - 重复批准同一 analysis stage 会被拒绝
+  - revise 后 rollback scope 的 artifact 与状态被正确清理/标记
+  - resume 会给出稳定恢复结论
+
+### 依据
+
+- 用户指令：完成每一步后必须先测试，通过后记录进度与架构洞察。
+- `memory-bank/features/v2/实施计划.md` 任务 7 步骤 4：
+  - 保持 `revise`、`stale`、恢复和重复执行语义稳定。
+- `memory-bank/features/v1/技术方案.md`：
+  - Workflow 负责回退逻辑、恢复逻辑和 checkpoint 策略
+  - 所有恢复动作都必须基于已持久化检查点
+
+### 验证记录
+
+1. 验证对象：任务 7 步骤 4 red 阶段
+   触发方式：先修改 `tests/integration/cli/run-record-commands.spec.ts`，再运行 `npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts`
+   预期结果：实现前准确暴露重复批准 `Requirement Synthesis` 仍会成功，导致下游阶段被重复执行
+   实际结果：通过；red 阶段失败点为重复 `run approve` 返回 `exitCode 0`
+
+2. 验证对象：analysis gate 的 revise / resume / duplicate-approve 语义
+   触发方式：补齐重复批准校验后运行 `npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts && npm run typecheck`
+   预期结果：重复批准被结构化失败拦下；revise 正确标记 stale 并清理 active artifact；resume 返回 `resume_current_stage`
+   实际结果：通过；integration 全量 `18/18` 通过，`typecheck` 退出码为 0
+
+### 当前边界说明
+
+- 到任务 7 结束为止，主流程前五个分析阶段、两个审批门、Execution handoff、revise / resume / duplicate-approve 语义已经形成最小闭环。
+- 当前还没有进入任务 8，因此 `Requirement Brief` 仍未作为独立 CLI 对外交付能力暴露。
+- 当前恢复语义已经能依赖按阶段落盘的 artifact / checkpoint，但更完整的报告导出与真实写回仍属于后续任务。
+
+## 2026-03-20 - v2 任务 7 步骤 3：在 `Requirement Synthesis` 与 `Fix Planning` 后接入真实审批门
+
+### 本轮完成内容
+
+- 在 `src/workflow/analysis-flow.ts` 中把分析链拆成两个显式段落：
+  - `runInitialAnalysisFlow()` 现在只负责跑到 `Requirement Synthesis`
+  - `runPostRequirementApprovalFlow()` 负责在 Requirement 审批通过后继续跑 `Code Localization` 与 `Fix Planning`
+- 在 `src/app/cli-orchestration.ts` 中新增并收敛了审批门相关装配：
+  - `persistAnalysisStageExecutions()`：支持在指定阶段把 `completed` 结果提升为 `waiting_approval`
+  - `readPersistedArtifact()` / `resolvePersistedArtifactPath()`：让审批通过后的下游阶段能从已落盘 stage artifact 恢复结构化输入，而不是重新猜上下文
+  - `getLatestStageArtifactRef()`：统一读取每个阶段当前有效 artifact ref
+- `run start` 的 `full` 模式现在会在 `Requirement Synthesis` 后真实停住：
+  - `current_stage = Requirement Synthesis`
+  - `stage_status_map['Requirement Synthesis'] = waiting_approval`
+  - `run_lifecycle_status = waiting_approval`
+- `run approve --stage "Requirement Synthesis"` 现在不再只是写一个 approval 标记，而是会：
+  - 读取已落盘的 `Context Resolution` / `Requirement Synthesis` artifact
+  - 继续执行 `Code Localization` 与 `Fix Planning`
+  - 在 `Fix Planning` 后进入第二个真实审批门
+- `run approve --stage "Fix Planning"` 现在会把 run 正式推进到 `Execution`，并复用既有 `Execution` 外部输入等待语义：
+  - `current_stage = Execution`
+  - `stage_status_map.Execution = waiting_external_input`
+  - `waiting_reason = gitlab_artifacts,verification_results,branch_binding`
+- 在 `buildStatusSummary()` 中补齐分析阶段 `waiting_approval` 的 allowed actions，使 `run status` 在两个审批门都能暴露 `run approve` / `run reject` / `run revise`
+- 在 `tests/integration/cli/run-record-commands.spec.ts` 中补齐步骤 3 的 red/green 覆盖：
+  - `run start` 会停在 `Requirement Synthesis`
+  - `run status` 会暴露审批动作
+  - 批准 Requirement 后会停在 `Fix Planning`
+  - 批准 Fix Planning 后才会进入 `Execution`
+
+### 依据
+
+- 用户指令：任务 7 每完成一步都先测试、验证，再更新文档；在任务 8 之前不要继续。
+- `memory-bank/features/v2/实施计划.md` 任务 7 步骤 3：
+  - 在 `Requirement Synthesis` 和 `Fix Planning` 后进入真实审批门。
+- `memory-bank/features/v1/需求文档.md` 与 `memory-bank/features/v1/技术方案.md`：
+  - 关键节点必须允许人工确认
+  - `Workflow/Agent Layer` 是审批与阶段流转的唯一 owner
+
+### 验证记录
+
+1. 验证对象：任务 7 步骤 3 red 阶段
+   触发方式：先修改 `tests/integration/cli/run-record-commands.spec.ts`，再运行 `npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts`
+   预期结果：实现前准确暴露 `run start` 会越过 Requirement 审批门，直接跑到 `Fix Planning`
+   实际结果：通过；red 阶段失败点为 `currentStage` 实际仍为 `Fix Planning`
+
+2. 验证对象：主流程分析审批链
+   触发方式：实现审批门、artifact 恢复读取与 approval 后续编排后运行 `npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts && npm run typecheck`
+   预期结果：`run start` 停在 `Requirement Synthesis`，批准后停在 `Fix Planning`，再次批准后进入 `Execution`
+   实际结果：通过；integration 全量 `17/17` 通过，`typecheck` 退出码为 0
+
+### 当前边界说明
+
+- 到步骤 3 为止，主流程分析阶段已经拥有真实审批门，但还没有系统化收口 `revise`、`stale`、恢复继续和重复执行语义。
+- 当前 approval 继续链路依赖已落盘 stage artifact 作为下游输入来源，这是刻意选择；下一步会重点验证这些 artifact 在 revise / resume / re-run 下是否仍然稳定。
+- `Requirement Brief` 对外交付仍未开始实现，继续保留在任务 8。
+
+## 2026-03-20 - v2 任务 7 步骤 2：为前五个分析阶段补齐 artifact、checkpoint 与状态推进
+
+### 本轮完成内容
+
+- 在 `src/workflow/analysis-flow.ts` 中把步骤 1 的聚合返回进一步细化为 `stageExecutions`：
+  - 每个已执行阶段都带上自己的 `result`
+  - 每个阶段都带上自己应投影到 `ExecutionContext` 的最小 `contextPatch`
+- 在 `src/app/cli-orchestration.ts` 中新增并收敛了分析阶段持久化逻辑：
+  - `slugifyStage()`：统一阶段名到 artifact / checkpoint trigger 的命名
+  - `applyAnalysisStageExecution()`：把 `StageResult` 映射为 `stage_status_map`、`run_lifecycle_status`、`run_outcome_status`、`waiting_reason` 和 `stage_artifact_refs`
+- `run start` 的 `full` 模式现在不再只在末尾写一次 context，而是会按阶段循环：
+  1. 为该阶段结果落一个结构化 artifact
+  2. 把该阶段状态推进合并回 `ExecutionContext`
+  3. 立即写入新的 checkpoint
+- `Intake` 阶段现在会同时拥有两类 artifact ref：
+  - 输入事实源 `artifact://jira/issues/<issue_key>`
+  - 结构化 `JiraIntakeStageResult` artifact
+- 在 `tests/integration/cli/run-record-commands.spec.ts` 中补齐步骤 2 的 red/green 覆盖：
+  - 锁定前五阶段的 `stage_status_map` 会真实推进到 `completed`
+  - 锁定每个阶段都会留下 artifact ref
+  - 锁定 checkpoint 会随阶段推进递增，而不是只保留初始化 checkpoint
+
+### 依据
+
+- 用户指令：任务 7 每完成一个步骤后都要先测试验证，通过后再更新 `progress.md` 与 `architecture.md`。
+- `memory-bank/features/v2/实施计划.md` 任务 7 步骤 2：
+  - 为每个阶段产出结构化 artifact、checkpoint 和状态推进。
+- `memory-bank/features/v1/技术方案.md`：
+  - `Workflow/Agent Layer` 负责阶段流转与 checkpoint 策略。
+  - `src/storage` 负责 artifact / checkpoint / context 落盘。
+
+### 验证记录
+
+1. 验证对象：任务 7 步骤 2 red 阶段
+   触发方式：先修改 `tests/integration/cli/run-record-commands.spec.ts`，再运行 `npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts`
+   预期结果：实现前准确暴露 `run start` 虽然会跑前五阶段，但 `stage_status_map` 仍停留在初始化状态，且没有按阶段落 checkpoint / artifact
+   实际结果：通过；red 阶段失败点为 `stage_status_map.Intake` 仍是 `not_started`
+
+2. 验证对象：前五阶段 artifact、checkpoint 与状态推进
+   触发方式：实现 `stageExecutions` 与按阶段持久化后运行 `npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts && npm run typecheck`
+   预期结果：每个已执行分析阶段都留下结构化 artifact、checkpoint 和 `completed` 状态；TypeScript 类型保持一致
+   实际结果：通过；integration 全量 `16/16` 通过，`typecheck` 退出码为 0
+
+### 当前边界说明
+
+- 步骤 2 到此完成的是“已执行阶段的 artifact / checkpoint / 状态推进”，还没有接入任务 7 步骤 3 的审批门。
+- 当前 happy path 下，`Requirement Synthesis` 和 `Fix Planning` 仍然会先被标记为 `completed`；下一步会把它们改造成真实 `waiting_approval` 停顿点。
+- 当前失败 / waiting 场景已经能形成阶段状态和 checkpoint，但还没有把 `revise`、`stale`、恢复继续和重复执行语义系统化收口；这些仍属于步骤 4。
+
+## 2026-03-20 - v2 任务 7 步骤 1：在 `run start` 中串起前五个分析阶段
+
+### 本轮完成内容
+
+- 在 `src/workflow/analysis-flow.ts` 新增 `runInitialAnalysisFlow()`，把任务 7 第一步要求的五段分析链路正式收敛为 workflow 层能力：
+  - `Intake`
+  - `Context Resolution`
+  - `Requirement Synthesis`
+  - `Code Localization`
+  - `Fix Planning`
+- 该 helper 当前只负责“顺序驱动 skill 并回填上下文投影”，还没有提前混入任务 7 步骤 2 的 artifact / checkpoint 持久化，也没有提前混入步骤 3 的审批门。
+- 在 `src/app/cli-orchestration.ts` 中把 `run start` 的 `full` 模式接到 `runInitialAnalysisFlow()`：
+  - 读取并持久化 Jira snapshot 后，继续运行前五个分析阶段
+  - 把阶段结果投影回 `ExecutionContext`
+  - 当前最小回填字段包括 `requirement_refs`、`repo_selection`、`code_targets`、`root_cause_hypotheses`、`fix_plan`、`verification_plan`
+- 在 `src/workflow/index.ts` 暴露新的 analysis flow 入口，保持 workflow 作为阶段编排 owner，app 只负责装配 Jira snapshot / project profile / run 生命周期。
+- 在 `tests/integration/cli/run-record-commands.spec.ts` 中补齐步骤 1 的 red/green 集成覆盖：
+  - 新增标准启动场景，锁定 `run start` 会把前五个分析阶段的核心上下文真正跑出来
+  - 同步更新既有 snapshot 测试，使其符合“run start 已经继续尝试主流程”的新事实
+
+### 依据
+
+- 用户指令：继续执行 `memory-bank/features/v2/实施计划.md` 的任务 7；每完成一个步骤必须先测试、验证，通过后更新 `progress.md` 与 `architecture.md`，在此之前不要进入任务 8。
+- `memory-bank/features/v2/实施计划.md` 任务 7 步骤 1：
+  - 在 `run start` 中依次编排 `Intake`、`Context Resolution`、`Requirement Synthesis`、`Code Localization`、`Fix Planning`。
+- `memory-bank/features/v1/技术方案.md`：
+  - `Workflow/Agent Layer` 是唯一业务状态 owner，负责主流程阶段编排。
+  - `Skill Layer` 只接受结构化输入并返回结构化结果，不直接做 I/O。
+
+### 验证记录
+
+1. 验证对象：任务 7 步骤 1 red 阶段
+   触发方式：先修改 `tests/integration/cli/run-record-commands.spec.ts`，再运行 `npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts`
+   预期结果：实现前准确暴露 `run start` 仍停在 `Intake`，没有把前五个分析阶段的上下文跑出来
+   实际结果：通过；red 阶段失败点为 `currentStage` 仍为 `Intake`
+
+2. 验证对象：前五个分析阶段的顺序编排与上下文投影
+   触发方式：实现 `src/workflow/analysis-flow.ts` 与 `src/app/cli-orchestration.ts` 后运行 `npm run test:integration -- tests/integration/cli/run-record-commands.spec.ts && npm run typecheck`
+   预期结果：标准 `run start` 会把 `requirement_refs`、`repo_selection`、`code_targets`、`fix_plan`、`verification_plan` 等最小上下文跑出来，且 TypeScript 类型保持一致
+   实际结果：通过；integration 全量 `15/15` 通过，`typecheck` 退出码为 0
+
+### 当前边界说明
+
+- 本步骤只完成“前五个分析阶段的顺序编排”，还没有进入任务 7 步骤 2 的“每阶段 artifact / checkpoint / 状态推进”。
+- 当前 `run start` 在 `full` 模式下已经不再是空壳 Intake 初始化，但审批门尚未接入；因此成功路径目前会停在 `Fix Planning`，失败路径会停在当前无法继续的分析阶段。
+- `brief_only`、`jira_writeback_only`、`feishu_record_only` 入口行为在本步骤未被扩展；`Requirement Brief` 对外交付仍然留给任务 8。
+
 ## 2026-03-20 - v2 任务 6 步骤 4：统一 Jira 读取失败的结构化错误语义
 
 ### 本轮完成内容

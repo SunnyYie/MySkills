@@ -6,6 +6,9 @@ import {
   BUGFIX_STAGES,
   CheckpointRecordSchema,
   ExecutionContextSchema,
+  JiraIssueSnapshotSchema,
+  ProjectContextStageResultSchema,
+  RequirementSynthesisStageResultSchema,
   StructuredErrorSchema,
   VerificationResultSchema,
   type CheckpointRecord,
@@ -36,6 +39,8 @@ import {
   applyRevisionRollback,
   getExecutionExternalInputState,
   recordExecutionExternalInputs,
+  runInitialAnalysisFlow,
+  runPostRequirementApprovalFlow,
 } from '../workflow/index.js';
 
 type HomeDirOptions = {
@@ -122,6 +127,14 @@ const KNOWLEDGE_RECORDING_STAGE = 'Knowledge Recording';
 const EXECUTION_STAGE = 'Execution';
 
 const DEFAULT_INITIATOR = 'cli:operator';
+const ANALYSIS_STAGE_STATUS_MAP = {
+  completed: 'completed',
+  waiting: 'waiting_external_input',
+  failed: 'failed',
+} as const;
+const ANALYSIS_APPROVAL_GATE_STAGES = new Set<
+  'Requirement Synthesis' | 'Fix Planning'
+>(['Requirement Synthesis', 'Fix Planning']);
 
 const serializeHash = (value: unknown) =>
   `sha256:${createHash('sha256').update(JSON.stringify(value)).digest('hex')}`;
@@ -221,10 +234,204 @@ const persistUpdatedContext = async ({
   };
 };
 
+const slugifyStage = (stage: (typeof BUGFIX_STAGES)[number]) =>
+  stage.toLowerCase().replace(/\s+/g, '-');
+
+const getLatestStageArtifactRef = (
+  context: ExecutionContext,
+  stage: (typeof BUGFIX_STAGES)[number],
+) => {
+  const stageRefs = context.stage_artifact_refs[stage];
+  return stageRefs?.at(-1) ?? null;
+};
+
+const resolvePersistedArtifactPath = ({
+  runId,
+  artifactRef,
+  homeDir,
+}: {
+  runId: string;
+  artifactRef: string;
+  homeDir?: string;
+}) => {
+  const runPaths = getRunPaths(runId, homeDir);
+  const runScopedPrefix = `artifact://${runId}/`;
+  if (artifactRef.startsWith(runScopedPrefix)) {
+    return path.join(runPaths.artifactsDir, artifactRef.slice(runScopedPrefix.length));
+  }
+
+  const issueKey = extractIssueKeyFromSnapshotRef(artifactRef);
+  if (issueKey) {
+    return path.join(runPaths.artifactsDir, `jira-issue-snapshot-${issueKey}.json`);
+  }
+
+  throw new Error(`Unsupported artifact ref ${artifactRef}.`);
+};
+
+const readPersistedArtifact = async ({
+  runId,
+  artifactRef,
+  homeDir,
+}: {
+  runId: string;
+  artifactRef: string;
+  homeDir?: string;
+}) =>
+  JSON.parse(
+    await readFile(
+      resolvePersistedArtifactPath({
+        runId,
+        artifactRef,
+        homeDir,
+      }),
+      'utf8',
+    ),
+  );
+
+const applyAnalysisStageExecution = ({
+  context,
+  stage,
+  stageResult,
+  stageArtifactRef,
+  contextPatch,
+  enterApprovalGate = false,
+}: {
+  context: ExecutionContext;
+  stage: (typeof BUGFIX_STAGES)[number];
+  stageResult: {
+    status: 'completed' | 'waiting' | 'failed';
+    waiting_for: string | null;
+    generated_at: string;
+  };
+  stageArtifactRef: string;
+  contextPatch: Partial<
+    Pick<
+      ExecutionContext,
+      | 'requirement_refs'
+      | 'repo_selection'
+      | 'code_targets'
+      | 'root_cause_hypotheses'
+      | 'fix_plan'
+      | 'verification_plan'
+    >
+  >;
+  enterApprovalGate?: boolean;
+}) => {
+  const stageStatus =
+    enterApprovalGate && stageResult.status === 'completed'
+      ? 'waiting_approval'
+      : ANALYSIS_STAGE_STATUS_MAP[stageResult.status];
+  const existingArtifactRefs = context.stage_artifact_refs[stage] ?? [];
+
+  return {
+    ...context,
+    ...contextPatch,
+    current_stage: stage,
+    updated_at: stageResult.generated_at,
+    waiting_reason: stageResult.status === 'waiting' ? stageResult.waiting_for : null,
+    run_lifecycle_status:
+      enterApprovalGate && stageResult.status === 'completed'
+        ? 'waiting_approval'
+        : stageResult.status === 'waiting'
+        ? 'waiting_external_input'
+        : stageResult.status === 'failed'
+          ? 'failed'
+          : 'active',
+    run_outcome_status: stageResult.status === 'failed' ? 'failed' : 'in_progress',
+    stage_status_map: {
+      ...context.stage_status_map,
+      [stage]: stageStatus,
+    },
+    stage_artifact_refs: {
+      ...context.stage_artifact_refs,
+      [stage]: [...existingArtifactRefs, stageArtifactRef],
+    },
+  } satisfies ExecutionContext;
+};
+
+const persistAnalysisStageExecutions = async ({
+  runId,
+  context,
+  stageExecutions,
+  homeDir,
+  approvalGateStages = new Set<(typeof BUGFIX_STAGES)[number]>(),
+}: {
+  runId: string;
+  context: ExecutionContext;
+  stageExecutions: Array<{
+    stage: (typeof BUGFIX_STAGES)[number];
+    result: {
+      status: 'completed' | 'waiting' | 'failed';
+      waiting_for: string | null;
+      generated_at: string;
+    };
+    contextPatch: Partial<
+      Pick<
+        ExecutionContext,
+        | 'requirement_refs'
+        | 'repo_selection'
+        | 'code_targets'
+        | 'root_cause_hypotheses'
+        | 'fix_plan'
+        | 'verification_plan'
+      >
+    >;
+  }>;
+  homeDir?: string;
+  approvalGateStages?: Set<(typeof BUGFIX_STAGES)[number]>;
+}) => {
+  let nextContext = context;
+  let latestCheckpointId: string | null = null;
+
+  for (const stageExecution of stageExecutions) {
+    const enterApprovalGate =
+      approvalGateStages.has(stageExecution.stage) &&
+      stageExecution.result.status === 'completed';
+    const persistedArtifact = await persistArtifactDocument({
+      runId,
+      stage: stageExecution.stage,
+      kind: `analysis-${slugifyStage(stageExecution.stage)}`,
+      payload: stageExecution.result,
+      homeDir,
+    });
+
+    nextContext = applyAnalysisStageExecution({
+      context: nextContext,
+      stage: stageExecution.stage,
+      stageResult: stageExecution.result,
+      stageArtifactRef: persistedArtifact.artifactRef,
+      contextPatch: stageExecution.contextPatch,
+      enterApprovalGate,
+    });
+
+    const persistedStage = await persistUpdatedContext({
+      runId,
+      context: nextContext,
+      triggerEvent: `analysis_stage_${slugifyStage(stageExecution.stage)}_${enterApprovalGate ? 'waiting_approval' : stageExecution.result.status}`,
+      homeDir,
+    });
+    latestCheckpointId = persistedStage.checkpoint.checkpoint_id;
+
+    if (enterApprovalGate || stageExecution.result.status !== 'completed') {
+      break;
+    }
+  }
+
+  return {
+    context: nextContext,
+    checkpointId: latestCheckpointId,
+  };
+};
+
 const buildStatusSummary = (context: ExecutionContext) => {
   const stageStatus =
     context.stage_status_map[context.current_stage] ?? 'not_started';
   const allowedActions = new Set<string>(['run status', 'run resume']);
+  if (stageStatus === 'waiting_approval') {
+    allowedActions.add('run approve');
+    allowedActions.add('run reject');
+    allowedActions.add('run revise');
+  }
 
   if (context.run_lifecycle_status === 'waiting_external_input') {
     const missingInputs =
@@ -421,6 +628,7 @@ export const createCliRun = async ({
         ...initialized.context,
         run_mode: runMode,
       };
+      let checkpointId: string;
 
       if (runMode !== 'feishu_record_only') {
         const snapshot = await readJiraIssueSnapshot({
@@ -450,15 +658,44 @@ export const createCliRun = async ({
             Intake: [persistedSnapshot.artifactRef],
           },
         };
-      }
 
-      nextContext = applyRunModePreset(nextContext);
-      const persisted = await persistUpdatedContext({
-        runId: initialized.runId,
-        context: nextContext,
-        triggerEvent: runMode === 'brief_only' ? 'run_brief_initialized' : 'run_started',
-        homeDir,
-      });
+        if (runMode === 'full') {
+          const analysisFlow = await runInitialAnalysisFlow({
+            projectProfile,
+            issueSnapshot: snapshot,
+          });
+          const persistedStages = await persistAnalysisStageExecutions({
+            runId: initialized.runId,
+            context: nextContext,
+            stageExecutions: analysisFlow.stageExecutions,
+            homeDir,
+            approvalGateStages: new Set(['Requirement Synthesis']),
+          });
+
+          nextContext = persistedStages.context;
+          checkpointId =
+            persistedStages.checkpointId ?? initialized.checkpoint.checkpoint_id;
+        } else {
+          nextContext = applyRunModePreset(nextContext);
+          const persisted = await persistUpdatedContext({
+            runId: initialized.runId,
+            context: nextContext,
+            triggerEvent:
+              runMode === 'brief_only' ? 'run_brief_initialized' : 'run_started',
+            homeDir,
+          });
+          checkpointId = persisted.checkpoint.checkpoint_id;
+        }
+      } else {
+        nextContext = applyRunModePreset(nextContext);
+        const persisted = await persistUpdatedContext({
+          runId: initialized.runId,
+          context: nextContext,
+          triggerEvent: 'run_started',
+          homeDir,
+        });
+        checkpointId = persisted.checkpoint.checkpoint_id;
+      }
 
       return {
         command: runMode === 'brief_only' ? 'run brief' : 'run start',
@@ -466,7 +703,7 @@ export const createCliRun = async ({
         runId: initialized.runId,
         runMode,
         currentStage: nextContext.current_stage,
-        checkpointId: persisted.checkpoint.checkpoint_id,
+        checkpointId,
         waitingReason: nextContext.waiting_reason,
         dryRun,
         dryRunArtifactTag: dryRun
@@ -639,52 +876,155 @@ export const approveCliRunStage = async ({
   }
 
   return wrapCommand('run approve', async () => {
-    const updated = await updateRun(
+    const restored = await restoreRun({
       runId,
       homeDir,
-      'approval_recorded',
-      async (context) => {
-        const approval = applyApprovalDecision({
-          stage,
-          decision: 'approve',
-          currentRunOutcomeStatus: context.run_outcome_status,
+    });
+
+    try {
+      if (
+        restored.latestContext.current_stage !== stage ||
+        restored.latestContext.stage_status_map[stage] !== 'waiting_approval'
+      ) {
+        return validationError(
+          'run approve',
+          `stage ${stage} is not currently waiting for approval on run ${runId}.`,
+          'Run status to inspect the current stage before retrying approval.',
+        );
+      }
+
+      const approval = applyApprovalDecision({
+        stage,
+        decision: 'approve',
+        currentRunOutcomeStatus: restored.latestContext.run_outcome_status,
+      });
+      let nextContext: ExecutionContext = {
+        ...restored.latestContext,
+        updated_at: new Date().toISOString(),
+        current_stage: stage,
+        waiting_reason: null,
+        run_lifecycle_status: approval.nextRunLifecycleStatus,
+        run_outcome_status: approval.nextRunOutcomeStatus,
+        stage_status_map: {
+          ...restored.latestContext.stage_status_map,
+          [stage]: approval.nextStageStatus,
+        },
+        active_approval_ref_map: {
+          ...restored.latestContext.active_approval_ref_map,
+          [stage]: `approval://${runId}/${encodeURIComponent(stage)}`,
+        },
+        ...(stage === ARTIFACT_LINKING_STAGE
+          ? { jira_writeback_draft_ref: previewRef }
+          : {}),
+        ...(stage === KNOWLEDGE_RECORDING_STAGE
+          ? { feishu_record_draft_ref: previewRef }
+          : {}),
+      };
+      let checkpointId: string;
+
+      if (stage === 'Requirement Synthesis') {
+        const projectProfile = await loadRequiredProjectProfile(
+          nextContext.project_id,
+          homeDir,
+        );
+        const snapshotArtifact = JiraIssueSnapshotSchema.parse(
+          await readPersistedArtifact({
+            runId,
+            artifactRef: nextContext.jira_issue_snapshot_ref,
+            homeDir,
+          }),
+        );
+        const projectContextArtifactRef = getLatestStageArtifactRef(
+          nextContext,
+          'Context Resolution',
+        );
+        const requirementArtifactRef = getLatestStageArtifactRef(
+          nextContext,
+          'Requirement Synthesis',
+        );
+
+        if (!projectContextArtifactRef || !requirementArtifactRef) {
+          throw new Error(
+            'Requirement approval cannot continue because required stage artifacts are missing.',
+          );
+        }
+
+        const projectContextResult = ProjectContextStageResultSchema.parse(
+          await readPersistedArtifact({
+            runId,
+            artifactRef: projectContextArtifactRef,
+            homeDir,
+          }),
+        );
+        const requirementResult = RequirementSynthesisStageResultSchema.parse(
+          await readPersistedArtifact({
+            runId,
+            artifactRef: requirementArtifactRef,
+            homeDir,
+          }),
+        );
+
+        const downstreamFlow = await runPostRequirementApprovalFlow({
+          projectProfile,
+          issueSnapshot: snapshotArtifact,
+          projectContext: projectContextResult.data!,
+          requirementBrief: requirementResult.data!,
         });
-
-        return {
-          ...context,
-          updated_at: new Date().toISOString(),
-          current_stage: stage,
-          run_lifecycle_status: approval.nextRunLifecycleStatus,
-          run_outcome_status: approval.nextRunOutcomeStatus,
+        const persistedStages = await persistAnalysisStageExecutions({
+          runId,
+          context: nextContext,
+          stageExecutions: downstreamFlow.stageExecutions,
+          homeDir,
+          approvalGateStages: new Set(['Fix Planning']),
+        });
+        nextContext = persistedStages.context;
+        checkpointId = persistedStages.checkpointId ?? restored.selectedCheckpoint.checkpoint_id;
+      } else if (stage === 'Fix Planning') {
+        const executionInputState = getExecutionExternalInputState(nextContext);
+        nextContext = {
+          ...nextContext,
+          current_stage: EXECUTION_STAGE,
+          waiting_reason: executionInputState.waitingReason,
+          run_lifecycle_status: executionInputState.runLifecycleStatus,
           stage_status_map: {
-            ...context.stage_status_map,
-            [stage]: approval.nextStageStatus,
+            ...nextContext.stage_status_map,
+            Execution: executionInputState.stageStatus,
           },
-          active_approval_ref_map: {
-            ...context.active_approval_ref_map,
-            [stage]: `approval://${runId}/${encodeURIComponent(stage)}`,
-          },
-          ...(stage === ARTIFACT_LINKING_STAGE
-            ? { jira_writeback_draft_ref: previewRef }
-            : {}),
-          ...(stage === KNOWLEDGE_RECORDING_STAGE
-            ? { feishu_record_draft_ref: previewRef }
-            : {}),
         };
-      },
-    );
 
-    return {
-      command: 'run approve',
-      exitCode: CLI_EXIT_CODES.success,
-      runId,
-      stage,
-      previewRef,
-      dryRun,
-      nonInteractive,
-      checkpointId: updated.checkpoint.checkpoint_id,
-      stageStatus: updated.context.stage_status_map[stage],
-    };
+        const persisted = await persistUpdatedContext({
+          runId,
+          context: nextContext,
+          triggerEvent: 'analysis_gate_fix_planning_approved',
+          homeDir,
+        });
+        checkpointId = persisted.checkpoint.checkpoint_id;
+      } else {
+        const persisted = await persistUpdatedContext({
+          runId,
+          context: nextContext,
+          triggerEvent: 'approval_recorded',
+          homeDir,
+        });
+        checkpointId = persisted.checkpoint.checkpoint_id;
+      }
+
+      return {
+        command: 'run approve',
+        exitCode: CLI_EXIT_CODES.success,
+        runId,
+        stage,
+        previewRef,
+        dryRun,
+        nonInteractive,
+        checkpointId,
+        stageStatus: nextContext.stage_status_map[stage],
+        currentStage: nextContext.current_stage,
+        waitingReason: nextContext.waiting_reason,
+      };
+    } finally {
+      await restored.releaseLock();
+    }
   });
 };
 

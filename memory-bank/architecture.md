@@ -1,5 +1,182 @@
 # Architecture Notes
 
+## v2 任务 7 步骤 4 当前 analysis gate 稳定性层
+
+步骤 3 已经把审批门接上了，但如果系统允许一个已经越过的审批门再次被批准、或者 revise 后仍残留旧 artifact 作为当前有效态，那主流程虽然“能跑”，却还不算稳定。步骤 4 的工作是把 analysis gate 从“可用”收敛到“可恢复、可回退、可防重复执行”。
+
+## 新增/调整文件职责
+
+### `src/app/cli-orchestration.ts`
+
+- `approveCliRunStage()` 现在在真正处理批准前，会先验证：
+  - 当前 run 是否真的停在这个 stage
+  - 该 stage 是否仍处于 `waiting_approval`
+- 这个 guard 让它开始同时承担“分析审批门幂等防护”的职责，而不只是“收到 approve 就继续往下跑”。
+- 同一个文件中，既有的 revise / resume 装配没有新增新概念，而是复用了：
+  - `applyRevisionRollback()`
+  - `restoreRun()`
+  - `getRecoveryAction()`
+  这说明步骤 4 主要是把新 analysis gate 纳入已有 workflow 语义，而不是为它再造一套新恢复协议。
+
+### `tests/integration/cli/run-record-commands.spec.ts`
+
+- 新增的稳定性测试把主流程 analysis gate 的“异常路径”正式纳入保护面：
+  - duplicate approve
+  - revise to upstream analysis stage
+  - resume after revise
+- 这组测试的意义不只是补 case，而是验证“按阶段 artifact 落盘”真的能支撑后续恢复和去重语义。
+
+## 任务 7 步骤 4 架构洞察
+
+- 把重复批准拦截放在 app 层，而不是塞进某个 skill 或 renderer，是合理的。它依赖的是当前 run state 和 stage status，这本来就是 app / workflow 边界上的判断，不是单个 skill 的职责。
+
+- revise 后删除 rollback scope 内的 active artifact ref，而不是试图“保留但忽略”，能让当前有效态和历史轨迹彻底分离。历史仍在 checkpoint 与旧 artifact 文件里，但当前上下文不会再误把它们当成仍可继续消费的输入。
+
+- `resume_current_stage` 能在 revise 后继续工作，说明 analysis gate 并没有破坏既有恢复模型。换句话说，任务 7 新增的是更多可恢复阶段，而不是另一套特殊恢复系统。
+
+- 通过 duplicate-approve guard，analysis gate 的“继续执行”终于从“每次命令都再跑一遍”收敛成“只在合法等待状态下才能推进一次”。这对后续真正的幂等、审计和恢复都是必要前提。
+
+## v2 任务 7 步骤 3 当前分析审批门层
+
+步骤 2 之后，前五个分析阶段虽然已经是“按阶段可观察”的，但系统仍然会一口气把它们全跑完，这和需求里“关键节点必须允许人工确认”的约束仍然不一致。步骤 3 的关键不是新增一个 approval 字段，而是把“审批门本身”也变成 workflow 的正式结构，而不是 CLI 上的一次孤立命令。
+
+## 新增/调整文件职责
+
+### `src/workflow/analysis-flow.ts`
+
+- 这个文件现在明确拆成两段分析编排：
+  - `runInitialAnalysisFlow()`：`Intake -> Context Resolution -> Requirement Synthesis`
+  - `runPostRequirementApprovalFlow()`：`Code Localization -> Fix Planning`
+- 这个拆分让“审批前上游输入”和“审批后下游输入”有了正式边界，而不是继续用一个全量 helper 在内部偷偷跨越审批门。
+
+### `src/app/cli-orchestration.ts`
+
+- 本轮这里新增了三个重要职责：
+  - `persistAnalysisStageExecutions()`：把阶段结果持久化与“是否进入审批门”结合起来
+  - `readPersistedArtifact()` / `resolvePersistedArtifactPath()`：从已落盘 artifact 重新恢复下游阶段所需输入
+  - `approveCliRunStage()` 中对分析阶段的专门处理：批准 Requirement 后继续分析，批准 Fix Plan 后推进到 Execution
+- 这个文件也因此开始承担一个更具体的 app 装配责任：
+  - 把“approval 决定”翻译成“是否继续调用下游 workflow helper”
+  - 把“已落盘 artifact”重新装配回结构化输入
+
+### `tests/integration/cli/run-record-commands.spec.ts`
+
+- 新增的审批链测试现在不只是保护命令有没有返回 0，而是在保护一条真正的主流程路径：
+  - `run start` 停在 Requirement 审批门
+  - `run status` 暴露审批动作
+  - 批准 Requirement 后停在 Fix Plan 审批门
+  - 批准 Fix Plan 后进入 Execution
+
+## 任务 7 步骤 3 架构洞察
+
+- 把分析链拆成“审批前”和“审批后”两段，是这一步最重要的架构决定。否则 `run start` 内部仍然会知道并执行所有下游阶段，审批门只会退化成一个表面上的暂停点。
+
+- approval 后继续执行时，选择从 stage artifact 重新恢复 `ProjectContextStageResult` 和 `RequirementSynthesisStageResult`，而不是从当前 `ExecutionContext` 生拼回完整对象，说明 artifact 已经开始承担“阶段级真实输入来源”的职责。这比依赖上下文字段拼装更稳定，也更接近恢复语义。
+
+- `persistAnalysisStageExecutions()` 同时知道“阶段结果是什么”和“哪些阶段要升格为 `waiting_approval`”，让 app 层的状态推进更集中。后续如果还要引入更多 analysis gate，不需要再把判断散落到 `run start`、`run approve` 和 tests 各处。
+
+- `Fix Planning` 批准后直接复用 `Execution` 既有等待外部输入逻辑，而不是重新造一套“analysis done, now waiting artifacts”的专用状态，说明任务 7 开始真正把前五阶段和既有 `Execution` 子流程接起来了。
+
+## v2 任务 7 步骤 2 当前分析阶段持久化层
+
+步骤 1 已经让 workflow 能顺序跑前五个阶段，但那时这些结果还只是“运行过了”，并没有形成阶段级 artifact、checkpoint 和可观察状态推进。步骤 2 的核心是把“分析过程”从一次性上下文补丁，提升成一串可恢复、可审计的阶段事件。
+
+## 新增/调整文件职责
+
+### `src/workflow/analysis-flow.ts`
+
+- 这个文件不再只返回一个聚合 `contextPatch`，而是进一步细化为 `stageExecutions`。
+- 每个 `stageExecution` 现在都明确包含：
+  - `stage`
+  - `result`
+  - `contextPatch`
+- 这意味着 analysis-flow 现在不仅描述“最后得到什么上下文”，还描述“每个阶段分别产出了什么、哪些字段该在这一阶段进入当前有效态”。
+
+### `src/app/cli-orchestration.ts`
+
+- 本轮这里新增了主流程分析阶段的持久化编排职责：
+  - `persistArtifactDocument()` 继续负责落 artifact 文件
+  - `applyAnalysisStageExecution()` 新增为“阶段结果 -> ExecutionContext 状态推进”的收口点
+  - `createCliRun()` 在 `full` 模式下开始按阶段循环写 artifact 和 checkpoint
+- 这个文件现在正式承担了一个更明确的 app 层责任：
+  - workflow 给出阶段语义与阶段结果
+  - app 决定何时把这些结果落成 artifact、何时写 checkpoint、何时更新当前 context
+
+### `tests/integration/cli/run-record-commands.spec.ts`
+
+- 新增的步骤 2 测试把保护面从“最终上下文长什么样”扩展到了“过程有没有被记录下来”。
+- 它现在开始锁定：
+  - 五个阶段都进入 `stage_status_map`
+  - `Intake` 除 snapshot 外还会多出自己的 stage result artifact
+  - checkpoint 数量会随着阶段推进增加，而不是永远只有初始化记录
+
+## 任务 7 步骤 2 架构洞察
+
+- `stageExecutions` 的价值在于把“阶段顺序”和“阶段持久化”解耦了。workflow 只需要说每个阶段产生了什么，app 再决定如何把这些结果落盘。这比让 workflow 直接写文件更符合上位技术方案的层次。
+
+- `applyAnalysisStageExecution()` 成为新的边界函数后，`StageResult.status` 到 `stage_status_map` / `run_lifecycle_status` 的映射终于有了一个显式 owner。后面接审批门时，只需要调整这个收口点附近的状态推进，而不用在多处复制判断。
+
+- `Intake` 同时保留 snapshot artifact 和 stage result artifact，体现的是“输入事实源”和“阶段解释结果”是两类不同对象。前者回答“Jira 原始事实是什么”，后者回答“workflow 对这份事实的 Intake 结论是什么”。
+
+- checkpoint 改为按阶段递增后，`run start` 终于开始具备真正的恢复价值。即使后面审批门或恢复逻辑还未接完，现在也已经有了可观测的阶段轨迹，而不是只有一个初始化点和一个最终点。
+
+## v2 任务 7 步骤 1 当前主流程分析编排层
+
+任务 6 结束后，`run start` 虽然已经拥有真实 Jira snapshot，但这份事实源还只是“被创建出来”，没有真正驱动后续分析阶段。步骤 1 的核心不是再补一个 skill，而是把 workflow 层第一次变成“会顺序驱动多个 skill 的 owner”，让前五个分析阶段开始形成一条连续分析链。
+
+## 新增/调整文件职责
+
+### `src/workflow/analysis-flow.ts`
+
+- 本轮新增 `runInitialAnalysisFlow()`，负责把五个分析阶段串成一条 workflow 级顺序链路。
+- 这个文件当前承担三类职责：
+  - 调用 `jira-intake`、`project-context`、`requirement-summarizer`、`code-locator`、`fix-planner`
+  - 在每个阶段后判断是否还能继续进入下游阶段
+  - 把可持久化的最小上下文投影整理成 `contextPatch`
+- 它刻意没有承担：
+  - artifact 落盘
+  - checkpoint 写入
+  - 审批记录创建
+  - CLI 渲染
+- 这让任务 7 步骤 1 先只解决“阶段怎么串起来”，而不提前把步骤 2/3 的职责揉在一起。
+
+### `src/workflow/index.ts`
+
+- 现在除了状态机、Execution、写回 helper 之外，也开始暴露主流程分析编排入口。
+- 这意味着 workflow 模块开始同时拥有：
+  - 阶段状态语义
+  - 回退/恢复规则
+  - 前五阶段的最小顺序编排能力
+
+### `src/app/cli-orchestration.ts`
+
+- `createCliRun()` 现在在 `full` 模式下承担新的装配职责：
+  - 先加载项目画像
+  - 再读取并持久化 Jira snapshot
+  - 然后把结构化 snapshot 交给 workflow 的 `runInitialAnalysisFlow()`
+  - 最后把 workflow 产出的上下文投影合并回 `ExecutionContext`
+- 这个变化保持了一个重要边界：
+  - app 负责把 profile、snapshot、run 生命周期装配到一起
+  - workflow 负责决定分析阶段怎么顺序执行
+  - skill 继续只处理结构化输入输出
+
+### `tests/integration/cli/run-record-commands.spec.ts`
+
+- 新增的标准启动场景开始保护一个新的系统事实：`run start` 不再只是“建 run + 落 snapshot”，而是会真正生成后续分析上下文。
+- 这组测试现在同时承担两层回归：
+  - 老的 Jira snapshot artifact 仍会正常落盘
+  - 新的主流程分析链会把 requirement / repo / code target / fix plan 等核心上下文跑出来
+
+## 任务 7 步骤 1 架构洞察
+
+- 把多 skill 顺序驱动放进 `src/workflow/analysis-flow.ts`，而不是继续堆进 `createCliRun()`，是这一步最关键的分层选择。否则 app 层会逐渐演化成第二个 workflow。
+
+- `runInitialAnalysisFlow()` 返回的是 `contextPatch`，不是直接写文件。这说明 workflow 仍然只拥有业务状态语义，不直接拥有持久化手段；artifact 和 checkpoint 仍然应该在 app / storage 层完成。
+
+- 这一步先只把 `requirement_refs`、`repo_selection`、`code_targets`、`root_cause_hypotheses`、`fix_plan`、`verification_plan` 投影回 `ExecutionContext`，等于明确了“哪些分析结果是 run 当前有效态的一部分”。更完整的阶段 artifact 与 checkpoint 历史，则自然留给步骤 2 去补齐。
+
+- 旧的 snapshot 测试从 `Intake` 改到 `Context Resolution`，反映的是一个真实架构变化：`run start` 已经不再把 Jira snapshot 当终点，而是会立刻尝试把它消费为主流程上游输入。
+
 ## v2 任务 6 步骤 4 当前 Jira 读取错误收敛层
 
 到步骤 3 为止，Jira 读取成功路径已经成立，但失败路径还不可靠：权限问题会直接冒出原生异常，fixture 缺失和未来 transport 404 也没有统一归类，字段缺失甚至可能演化成 `TypeError`。如果不把这些错误收敛在 connector，后续 app、workflow 和 CLI 都会被迫知道底层 transport 的细节。
